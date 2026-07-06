@@ -1,4 +1,4 @@
-import { toPakistanParts, pakistanPartsToUtcMs } from './pakistanTime';
+import { toPakistanParts, pakistanPartsToUtcMs, formatPakistanDateTime } from './pakistanTime';
 
 /**
  * Days remaining until expiry, counted on the Pakistan calendar (not UTC,
@@ -40,5 +40,5 @@ export const personalizeMessage = (body, contact, daysLeft) => {
     .replace(/\{name\}/gi, contact.name ?? '')
     .replace(/\{phone\}/gi, contact.phone_number ?? '')
     .replace(/\{days\}/gi, daysLeft.toString())
-    .replace(/\{expiry\}/gi, contact.expiry_datetime ?? '');
+    .replace(/\{expiry\}/gi, formatPakistanDateTime(contact.expiry_datetime));
 };

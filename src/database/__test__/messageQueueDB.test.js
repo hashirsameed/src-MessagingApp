@@ -132,16 +132,74 @@ describe('addToQueueDetailed dedup rules', () => {
   });
 
   it('refuses re-queueing a pair that was already SENT within the last 30 days', () => {
-    const first = addToQueueDetailed('contact-c', 'template-c', 'sms');
-    // Find the row claimPendingQueue-style and mark it sent directly.
+    addToQueueDetailed('contact-c', 'template-c', 'sms');
+
     const db = getDB();
     const row = db.execute(
       `SELECT id FROM message_queue WHERE contact_id = ? AND template_id = ?;`,
       ['contact-c', 'template-c'],
     ).rows._array[0];
+
     markAsSent(row.id);
 
     const second = addToQueueDetailed('contact-c', 'template-c', 'sms');
     expect(second).toEqual({ added: false, reason: 'ALREADY_SENT_RECENTLY' });
+  });
+
+  it('refuses re-queueing a pair that FAILED within the last 24 hours', () => {
+    insertRawQueueRow({
+      id: 'failed-1',
+      contactId: 'contact-d',
+      templateId: 'template-d',
+      status: 'FAILED',
+      minutesAgo: 60,
+    });
+
+    const result = addToQueueDetailed('contact-d', 'template-d', 'sms');
+
+    expect(result).toEqual({
+      added: false,
+      reason: 'RECENTLY_FAILED',
+    });
+
+    const db = getDB();
+    const rows = db.execute(
+      `SELECT * FROM message_queue
+       WHERE contact_id = ? AND template_id = ?;`,
+      ['contact-d', 'template-d'],
+    ).rows._array;
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe('FAILED');
+  });
+
+  it('allows re-queueing a pair that FAILED more than 24 hours ago', () => {
+    const db = getDB();
+
+    db.execute(
+      `INSERT INTO message_queue
+        (id, contact_id, template_id, platform_id, status, created_at)
+       VALUES
+        (?, ?, ?, 'sms', 'FAILED', datetime('now', '-25 hours'));`,
+      ['failed-old-1', 'contact-e', 'template-e'],
+    );
+
+    const result = addToQueueDetailed('contact-e', 'template-e', 'sms');
+
+    expect(result).toEqual({
+      added: true,
+      reason: 'QUEUED',
+    });
+
+    const rows = db.execute(
+      `SELECT * FROM message_queue
+       WHERE contact_id = ? AND template_id = ?
+       ORDER BY created_at ASC;`,
+      ['contact-e', 'template-e'],
+    ).rows._array;
+
+    expect(rows).toHaveLength(2);
+    expect(rows[0].status).toBe('FAILED');
+    expect(rows[1].status).toBe('PENDING');
   });
 });

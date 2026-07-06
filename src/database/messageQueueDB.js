@@ -48,12 +48,22 @@ export const addToQueueDetailed = (contactId, templateId, platformId, traceId = 
     if (pendingCheck.rows?._array?.length > 0) {
       const existingId = pendingCheck.rows._array[0].id;
       debugTrace('AddToQueueDuplicateCheckResult', {
-        traceId, contactId, templateId, queueId: existingId,
-        alreadySentCount, duplicateCheckResult: 'ALREADY_PENDING',
+        traceId,
+        contactId,
+        templateId,
+        queueId: existingId,
+        alreadySentCount,
+        duplicateCheckResult: 'ALREADY_PENDING',
       });
       debugTraceDuration('AddToQueueDetailedExit', startTime, {
-        traceId, contactId, templateId, platformId, queueId: existingId,
-        exitReason: 'already_pending', added: false, reason: 'ALREADY_PENDING',
+        traceId,
+        contactId,
+        templateId,
+        platformId,
+        queueId: existingId,
+        exitReason: 'already_pending',
+        added: false,
+        reason: 'ALREADY_PENDING',
       });
       return { added: false, reason: 'ALREADY_PENDING' };
     }
@@ -68,39 +78,107 @@ export const addToQueueDetailed = (contactId, templateId, platformId, traceId = 
     if (sentCheck.rows?._array?.length > 0) {
       const existingId = sentCheck.rows._array[0].id;
       debugTrace('AddToQueueDuplicateCheckResult', {
-        traceId, contactId, templateId, queueId: existingId,
-        alreadySentCount, duplicateCheckResult: 'ALREADY_SENT_RECENTLY',
+        traceId,
+        contactId,
+        templateId,
+        queueId: existingId,
+        alreadySentCount,
+        duplicateCheckResult: 'ALREADY_SENT_RECENTLY',
       });
       debugTraceDuration('AddToQueueDetailedExit', startTime, {
-        traceId, contactId, templateId, platformId, queueId: existingId,
-        exitReason: 'already_sent_recently', added: false, reason: 'ALREADY_SENT_RECENTLY',
+        traceId,
+        contactId,
+        templateId,
+        platformId,
+        queueId: existingId,
+        exitReason: 'already_sent_recently',
+        added: false,
+        reason: 'ALREADY_SENT_RECENTLY',
       });
       return { added: false, reason: 'ALREADY_SENT_RECENTLY' };
     }
 
+    const recentFailCheck = db.execute(
+      `SELECT id FROM message_queue
+       WHERE contact_id = ? AND template_id = ? AND status = 'FAILED'
+       AND created_at >= datetime('now', '-24 hours');`,
+      [contactId, templateId],
+    );
+    if (recentFailCheck.rows?._array?.length > 0) {
+      const existingId = recentFailCheck.rows._array[0].id;
+      debugTrace('AddToQueueDuplicateCheckResult', {
+        traceId,
+        contactId,
+        templateId,
+        queueId: existingId,
+        alreadySentCount,
+        duplicateCheckResult: 'RECENTLY_FAILED',
+      });
+      debugTraceDuration('AddToQueueDetailedExit', startTime, {
+        traceId,
+        contactId,
+        templateId,
+        platformId,
+        queueId: existingId,
+        exitReason: 'recently_failed',
+        added: false,
+        reason: 'RECENTLY_FAILED',
+      });
+      return { added: false, reason: 'RECENTLY_FAILED' };
+    }
+
     const id = `${contactId}_${templateId}_${Date.now()}`;
     debugTraceDbWrite('AddToQueueInsert', {
-      table: 'message_queue', pk: id, oldState: 'none', newState: QUEUE_STATUS.PENDING,
-      traceId, contactId, templateId, platformId, alreadySentCount,
+      table: 'message_queue',
+      pk: id,
+      oldState: 'none',
+      newState: QUEUE_STATUS.PENDING,
+      traceId,
+      contactId,
+      templateId,
+      platformId,
+      alreadySentCount,
     });
+
     db.execute(
       `INSERT INTO message_queue (id, contact_id, template_id, platform_id, status)
        VALUES (?, ?, ?, ?, 'PENDING');`,
       [id, contactId, templateId, platformId],
     );
+
     debugTraceDuration('AddToQueueDetailedExit', startTime, {
-      traceId, contactId, templateId, platformId, queueId: id,
-      exitReason: 'queued', added: true, reason: 'QUEUED',
+      traceId,
+      contactId,
+      templateId,
+      platformId,
+      queueId: id,
+      exitReason: 'queued',
+      added: true,
+      reason: 'QUEUED',
     });
+
     return { added: true, reason: 'QUEUED' };
   } catch (error) {
     debugTraceError('AddToQueueDetailedCatch', error, {
-      traceId, function: 'addToQueueDetailed', contactId, templateId, platformId,
+      traceId,
+      function: 'addToQueueDetailed',
+      contactId,
+      templateId,
+      platformId,
     });
+
     handleError(error, 'addToQueueDetailed');
+
     debugTraceDuration('AddToQueueDetailedExit', startTime, {
-      traceId, contactId, templateId, platformId, exitReason: 'db_error', added: false, reason: 'DB_ERROR',
+      traceId,
+      contactId,
+      templateId,
+      platformId,
+      exitReason: 'db_error',
+      added: false,
+      reason: 'DB_ERROR',
     });
+
     return { added: false, reason: 'DB_ERROR' };
   }
 };
