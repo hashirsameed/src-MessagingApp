@@ -7,6 +7,8 @@ import {
   cancelAllScheduledAlarmsForTemplate,
   getAllActiveScheduledAlarms,
 } from '../database/scheduledAlarmDB';
+import { debugTrace, debugTraceError, debugTraceDuration, generateTraceId } from './debugTrace';
+import { toPakistanParts, pakistanPartsToUtcMs } from './pakistanTime';
 
 const { AlarmModule } = NativeModules;
 const IMMEDIATE_ALARM_DELAY_MS = 10000;
@@ -31,10 +33,16 @@ export const getRequestCode = (contactId, templateId) => {
 
 export const canScheduleExactAlarms = async () => {
   if (Platform.OS !== 'android') return true;
-  if (!AlarmModule?.canScheduleExactAlarms) return false;
+  if (!AlarmModule?.canScheduleExactAlarms) {
+    debugTrace('CanScheduleExactAlarmsExit', { exitReason: 'native_module_not_linked' });
+    return false;
+  }
   try {
-    return await AlarmModule.canScheduleExactAlarms();
+    const result = await AlarmModule.canScheduleExactAlarms();
+    debugTrace('CanScheduleExactAlarmsResult', { granted: result });
+    return result;
   } catch (error) {
+    debugTraceError('CanScheduleExactAlarmsCatch', error, { function: 'canScheduleExactAlarms' });
     handleError(error, 'canScheduleExactAlarms');
     return false;
   }
@@ -47,16 +55,21 @@ export const requestBatteryOptimizationExemption = () => {
 
     AlarmModule.isIgnoringBatteryOptimizations()
       .then((ignoring) => {
+        debugTrace('BatteryOptimizationCheck', { ignoring });
         if (ignoring) return resolve();
 
         Alert.alert(
           'Disable Battery Optimization',
           'To avoid delayed reminders, please allow this app to run without battery restrictions.',
           [
-            { text: 'Cancel', style: 'cancel', onPress: () => resolve() },
+            { text: 'Cancel', style: 'cancel', onPress: () => {
+              debugTrace('BatteryOptimizationPromptResult', { userChoice: 'cancel' });
+              resolve();
+            } },
             {
               text: 'Allow',
               onPress: () => {
+                debugTrace('BatteryOptimizationPromptResult', { userChoice: 'allow' });
                 AlarmModule.requestIgnoreBatteryOptimizations();
                 resolve();
               },
@@ -66,6 +79,7 @@ export const requestBatteryOptimizationExemption = () => {
         );
       })
       .catch((error) => {
+        debugTraceError('BatteryOptimizationCheckCatch', error, { function: 'requestBatteryOptimizationExemption' });
         handleError(error, 'requestBatteryOptimizationExemption');
         resolve();
       });
@@ -79,16 +93,21 @@ const requestExactAlarmPermission = () => {
 
     AlarmModule.canScheduleExactAlarms()
       .then((granted) => {
+        debugTrace('ExactAlarmPermissionCheck', { granted });
         if (granted) return resolve();
 
         Alert.alert(
           'Allow Exact Alarms',
           'To send expiry reminders at the exact time you set — even when the app is closed — please allow "Alarms & reminders" for this app.',
           [
-            { text: 'Cancel', style: 'cancel', onPress: () => resolve() },
+            { text: 'Cancel', style: 'cancel', onPress: () => {
+              debugTrace('ExactAlarmPermissionPromptResult', { userChoice: 'cancel' });
+              resolve();
+            } },
             {
               text: 'Allow',
               onPress: () => {
+                debugTrace('ExactAlarmPermissionPromptResult', { userChoice: 'allow' });
                 AlarmModule.openExactAlarmSettings();
                 resolve();
               },
@@ -98,6 +117,7 @@ const requestExactAlarmPermission = () => {
         );
       })
       .catch((error) => {
+        debugTraceError('ExactAlarmPermissionCheckCatch', error, { function: 'requestExactAlarmPermission' });
         handleError(error, 'requestExactAlarmPermission');
         resolve();
       });
@@ -106,10 +126,14 @@ const requestExactAlarmPermission = () => {
 
 export const runPermissionOnboardingFlow = async () => {
   if (Platform.OS !== 'android') return;
+  const traceId = generateTraceId('permissionOnboarding');
+  debugTrace('RunPermissionOnboardingFlowStart', { traceId });
   try {
     await requestExactAlarmPermission();
     await requestBatteryOptimizationExemption();
+    debugTrace('RunPermissionOnboardingFlowEnd', { traceId, outcome: 'completed' });
   } catch (error) {
+    debugTraceError('RunPermissionOnboardingFlowCatch', error, { function: 'runPermissionOnboardingFlow', traceId });
     handleError(error, 'runPermissionOnboardingFlow');
   }
 };
@@ -139,14 +163,27 @@ export const computeTargetAlarmTimestamp = (contact, template) => {
   if (isNaN(daysBefore)) return null;
 
   const timeMatch = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(template.send_time ?? '');
+
+  // Everything below is expressed in Pakistan wall-clock time (fixed
+  // UTC+5, no DST) — never the device's own timezone. "days_before"
+  // shifts by whole days on the Pakistan calendar.
+  const expiryParts = toPakistanParts(expiry);
+  const expiryPktMidnightMs = pakistanPartsToUtcMs(expiryParts.year, expiryParts.month, expiryParts.day);
+  const shiftedMidnightMs = expiryPktMidnightMs - daysBefore * 24 * 60 * 60 * 1000;
+  const shiftedParts = toPakistanParts(new Date(shiftedMidnightMs));
+
   if (!timeMatch) {
-    return expiry.getTime() - daysBefore * 24 * 60 * 60 * 1000;
+    // No explicit send_time — keep the expiry's own Pakistan time-of-day.
+    return pakistanPartsToUtcMs(
+      shiftedParts.year, shiftedParts.month, shiftedParts.day,
+      expiryParts.hour, expiryParts.minute, expiryParts.second,
+    );
   }
 
-  const target = new Date(expiry);
-  target.setDate(target.getDate() - daysBefore);
-  target.setHours(parseInt(timeMatch[1], 10), parseInt(timeMatch[2], 10), 0, 0);
-  return target.getTime();
+  return pakistanPartsToUtcMs(
+    shiftedParts.year, shiftedParts.month, shiftedParts.day,
+    parseInt(timeMatch[1], 10), parseInt(timeMatch[2], 10), 0,
+  );
 };
 
 export const computeAlarmTimestamp = (contact, template) => {

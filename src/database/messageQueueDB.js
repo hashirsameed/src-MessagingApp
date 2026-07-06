@@ -124,6 +124,49 @@ export const claimPendingQueue = (callerId = null) => {
   try {
     const db = getDB();
 
+    // ---------------------------------------------------------------------
+    // Recover stale PROCESSING rows left behind by a run that never
+    // finished (headless task killed mid-send, app force-closed, etc).
+    // We do NOT silently resend these — for SMS the native send may have
+    // already gone out before the crash — so they're moved to FAILED and
+    // surfaced in the Failed tab for a deliberate manual retry instead.
+    // This is what previously caused "reopening the app resends messages
+    // that were already sent" and the endless SMS retry behavior: the old
+    // query below picked up ALL status='PROCESSING' rows, including these
+    // stuck ones, every single run.
+    // ---------------------------------------------------------------------
+    const STALE_PROCESSING_MINUTES = 2;
+    const staleRows = db.execute(
+      `SELECT id, contact_id, template_id FROM message_queue
+       WHERE status = 'PROCESSING'
+       AND created_at <= datetime('now', '-${STALE_PROCESSING_MINUTES} minutes');`,
+    ).rows?._array ?? [];
+
+    if (staleRows.length > 0) {
+      debugTrace('ClaimPendingQueueStaleProcessingFound', {
+        callerId,
+        staleCount: staleRows.length,
+        staleIds: staleRows.map((r) => r.id).join(','),
+      });
+      staleRows.forEach((row) => {
+        debugTraceDbWrite('ClaimPendingQueueStaleProcessingRecovered', {
+          table: 'message_queue',
+          pk: row.id,
+          oldState: 'PROCESSING',
+          newState: 'FAILED',
+          callerId,
+          contactId: row.contact_id,
+          templateId: row.template_id,
+          reason: 'STUCK_PROCESSING_TIMEOUT',
+        });
+      });
+      db.execute(
+        `UPDATE message_queue
+         SET status = 'FAILED', error_reason = 'STUCK_PROCESSING_TIMEOUT', attempt_count = attempt_count + 1
+         WHERE status = 'PROCESSING' AND created_at <= datetime('now', '-${STALE_PROCESSING_MINUTES} minutes');`,
+      );
+    }
+
     const pendingBefore = db.execute(
       `SELECT id, contact_id, template_id, status FROM message_queue WHERE status = 'PENDING';`,
     ).rows?._array ?? [];
@@ -133,18 +176,29 @@ export const claimPendingQueue = (callerId = null) => {
       pendingIds: pendingBefore.map((r) => r.id).join(','),
     });
 
+    if (pendingBefore.length === 0) {
+      debugTraceDuration('ClaimPendingQueueEnd', startTime, { callerId, claimedCount: 0, queueIds: '' });
+      return [];
+    }
+
+    const ids = pendingBefore.map((r) => r.id);
+    const placeholders = ids.map(() => '?').join(',');
+
     debugTraceDbWrite('ClaimPendingQueueUpdate', {
       table: 'message_queue',
-      pk: pendingBefore.map((r) => r.id).join(',') || 'none',
+      pk: ids.join(','),
       oldState: QUEUE_STATUS.PENDING,
       newState: QUEUE_STATUS.PROCESSING,
-      rowCount: pendingBefore.length,
+      rowCount: ids.length,
       claimedBy: callerId,
     });
-    db.execute(`UPDATE message_queue SET status = 'PROCESSING' WHERE status = 'PENDING';`);
+    db.execute(`UPDATE message_queue SET status = 'PROCESSING' WHERE id IN (${placeholders});`, ids);
 
+    // Only return the rows THIS run just claimed (by id) — not every row
+    // that happens to have status='PROCESSING' at this instant.
     const result = db.execute(
-      `SELECT * FROM message_queue WHERE status = 'PROCESSING' ORDER BY created_at ASC;`,
+      `SELECT * FROM message_queue WHERE id IN (${placeholders}) ORDER BY created_at ASC;`,
+      ids,
     );
     const claimed = result.rows?._array || [];
     debugTraceDuration('ClaimPendingQueueEnd', startTime, {

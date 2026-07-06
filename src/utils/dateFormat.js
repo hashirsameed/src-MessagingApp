@@ -1,3 +1,5 @@
+import { PAKISTAN_TIME_ZONE } from './pakistanTime';
+
 export const formatDateTime12Hour = (iso) => {
   if (!iso) return '—';
 
@@ -8,12 +10,14 @@ export const formatDateTime12Hour = (iso) => {
     day: '2-digit',
     month: 'short',
     year: 'numeric',
+    timeZone: PAKISTAN_TIME_ZONE,
   });
 
   const timePart = date.toLocaleTimeString('en-US', {
     hour: 'numeric',
     minute: '2-digit',
     hour12: true,
+    timeZone: PAKISTAN_TIME_ZONE,
   });
 
   return `${datePart}, ${timePart}`;

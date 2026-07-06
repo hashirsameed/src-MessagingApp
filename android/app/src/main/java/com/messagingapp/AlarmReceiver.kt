@@ -40,7 +40,7 @@ class AlarmReceiver : BroadcastReceiver() {
                 "AlarmReceiverStartServiceBefore",
                 mapOf("contactId" to contactId, "templateId" to templateId, "requestCode" to requestCode),
             )
-            context.startService(serviceIntent)
+            context.startForegroundService(serviceIntent)
             TraceLog.d(
                 "AlarmReceiverStartServiceAfter",
                 mapOf("contactId" to contactId, "templateId" to templateId, "requestCode" to requestCode),

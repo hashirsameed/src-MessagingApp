@@ -12,13 +12,15 @@
 
 import { runExpiryCheck } from './schedulerEngine';
 import { handleError } from './errorHandler';
+import { debugTrace, debugTraceError } from './debugTrace';
 
 export { runExpiryCheck };
 
 export const registerBackgroundScheduler = async () => {
   try {
-    console.log('[Scheduler] Foreground auto-send active. Background fetch not configured.');
+    debugTrace('RegisterBackgroundScheduler', { mode: 'foreground_only', backgroundFetch: 'not_configured' });
   } catch (error) {
+    debugTraceError('RegisterBackgroundSchedulerCatch', error, { function: 'registerBackgroundScheduler' });
     handleError(error, 'registerBackgroundScheduler');
   }
 };

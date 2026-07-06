@@ -1,12 +1,64 @@
 package com.messagingapp
 
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.content.Intent
+import android.os.Build
 import android.os.Bundle
 import com.facebook.react.HeadlessJsTaskService
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.jstasks.HeadlessJsTaskConfig
 
 class AlarmTaskService : HeadlessJsTaskService() {
+
+    companion object {
+        private const val CHANNEL_ID = "alarm_task_service_channel"
+        private const val NOTIFICATION_ID = 4271
+    }
+
+    /**
+     * Must call startForeground() immediately after the service is created —
+     * the OS gives only a few seconds after startForegroundService() before
+     * throwing ForegroundServiceDidNotStartInTimeException. This is what
+     * legally allows AlarmTaskService to run while the app is backgrounded
+     * or fully killed.
+     */
+    override fun onCreate() {
+        super.onCreate()
+        createNotificationChannelIfNeeded()
+        val notification = buildSilentNotification()
+        startForeground(NOTIFICATION_ID, notification)
+        TraceLog.d("AlarmTaskServiceForegroundStarted", mapOf("notificationId" to NOTIFICATION_ID))
+    }
+
+    private fun createNotificationChannelIfNeeded() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val manager = getSystemService(NotificationManager::class.java)
+            val existing = manager?.getNotificationChannel(CHANNEL_ID)
+            if (existing == null) {
+                val channel = NotificationChannel(
+                    CHANNEL_ID,
+                    "Reminder delivery",
+                    NotificationManager.IMPORTANCE_MIN,
+                ).apply {
+                    description = "Sends scheduled expiry reminders in the background"
+                    setShowBadge(false)
+                }
+                manager?.createNotificationChannel(channel)
+            }
+        }
+    }
+
+    private fun buildSilentNotification(): Notification {
+        return Notification.Builder(this, CHANNEL_ID)
+            .setContentTitle("Sending reminders")
+            .setSmallIcon(android.R.drawable.stat_notify_sync)
+            .setPriority(Notification.PRIORITY_MIN)
+            .setOngoing(true)
+            .build()
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         TraceLog.d(
             "AlarmTaskServiceOnStartCommandStart",
@@ -93,6 +145,12 @@ class AlarmTaskService : HeadlessJsTaskService() {
 
     override fun onDestroy() {
         TraceLog.d("AlarmTaskServiceOnDestroy", emptyMap())
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } else {
+            @Suppress("DEPRECATION")
+            stopForeground(true)
+        }
         super.onDestroy()
     }
 }

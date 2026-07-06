@@ -1,16 +1,20 @@
+import { toPakistanParts, pakistanPartsToUtcMs } from './pakistanTime';
+
 /**
- * Days remaining until expiry, based on the contact's UTC expiry_datetime.
- * Calendar-day diff is computed in UTC to stay consistent with how
- * expiry_datetime is stored (always UTC ISO).
+ * Days remaining until expiry, counted on the Pakistan calendar (not UTC,
+ * not the device's local calendar) — so "3 days before expiry" always
+ * means 3 Pakistan-calendar days, regardless of where the phone is set.
  */
 export const getDaysUntilExpiry = (expiryDatetime) => {
   const now = new Date();
-  const todayUTC = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const nowParts = toPakistanParts(now);
+  const todayPktMs = pakistanPartsToUtcMs(nowParts.year, nowParts.month, nowParts.day);
 
   const expiry = new Date(expiryDatetime);
-  const expiryUTC = Date.UTC(expiry.getUTCFullYear(), expiry.getUTCMonth(), expiry.getUTCDate());
+  const expiryParts = toPakistanParts(expiry);
+  const expiryPktMs = pakistanPartsToUtcMs(expiryParts.year, expiryParts.month, expiryParts.day);
 
-  const diff = expiryUTC - todayUTC;
+  const diff = expiryPktMs - todayPktMs;
   return Math.round(diff / (1000 * 60 * 60 * 24));
 };
 
