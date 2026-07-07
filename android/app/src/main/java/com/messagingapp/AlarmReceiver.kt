@@ -36,16 +36,18 @@ class AlarmReceiver : BroadcastReceiver() {
                 putInt("requestCode", requestCode)
             })
         }
+        val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+        val wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MessagingApp:AlarmReceiver")
         try {
             TraceLog.d(
                 "AlarmReceiverStartServiceBefore",
                 mapOf("contactId" to contactId, "templateId" to templateId, "requestCode" to requestCode)
             )
-            
-            // Acquire wake lock BEFORE starting service to keep CPU awake
-            val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
-            val wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MessagingApp:AlarmReceiver")
-            wakeLock.acquire(60 * 1000L) // 60 seconds
+
+            // Acquire wake lock BEFORE starting service to keep CPU awake.
+            // Released explicitly in finally below — the 60s timeout was only
+            // a safety cap, not a substitute for releasing it ourselves.
+            wakeLock.acquire(60 * 1000L)
 
             context.startForegroundService(serviceIntent)
             TraceLog.d(
@@ -74,6 +76,8 @@ class AlarmReceiver : BroadcastReceiver() {
                 error,
                 mapOf("contactId" to contactId, "templateId" to templateId, "requestCode" to requestCode),
             )
+        } finally {
+            if (wakeLock.isHeld) wakeLock.release()
         }
         TraceLog.d(
             "AlarmReceiverOnReceiveEnd",

@@ -95,7 +95,10 @@ class AlarmTaskService : HeadlessJsTaskService() {
                 "RescheduleAlarmsTask",
                 Arguments.createMap(),
                 60000,
-                false,
+                // allowedInForeground=true: BootReceiver runs this early after
+                // boot, but WorkManager's safety-net can also re-trigger a
+                // reschedule while the app happens to be open — must not crash then.
+                true,
             )
         }
 
@@ -105,7 +108,10 @@ class AlarmTaskService : HeadlessJsTaskService() {
                 "SafetyNetTask",
                 Arguments.createMap(),
                 60000,
-                false,
+                // allowedInForeground=true: WorkManager's periodic run can fire
+                // at any time, including while the app is in the foreground.
+                // false here threw IllegalStateException and crashed the app.
+                true,
             )
         }
 
