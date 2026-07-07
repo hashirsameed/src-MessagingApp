@@ -99,6 +99,16 @@ class AlarmTaskService : HeadlessJsTaskService() {
             )
         }
 
+        if (intent.action == "SAFETY_NET_CHECK") {
+            TraceLog.d("AlarmTaskServiceConfigSafetyNet", mapOf("timeoutMs" to 60000, "taskName" to "SafetyNetTask"))
+            return HeadlessJsTaskConfig(
+                "SafetyNetTask",
+                Arguments.createMap(),
+                60000,
+                false,
+            )
+        }
+
         val extras: Bundle = intent.extras ?: run {
             TraceLog.d(
                 "AlarmTaskServiceGetTaskConfigExit",
@@ -145,6 +155,7 @@ class AlarmTaskService : HeadlessJsTaskService() {
 
     override fun onDestroy() {
         TraceLog.d("AlarmTaskServiceOnDestroy", emptyMap())
+        NextMessageWidgetProvider.refreshAll(applicationContext)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE)
         } else {

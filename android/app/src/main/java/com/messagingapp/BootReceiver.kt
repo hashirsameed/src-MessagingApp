@@ -24,7 +24,7 @@ class BootReceiver : BroadcastReceiver() {
         }
         try {
             TraceLog.d("BootReceiverStartServiceBefore", mapOf("action" to serviceIntent.action))
-            context.startService(serviceIntent)
+            context.startForegroundService(serviceIntent)
             TraceLog.d("BootReceiverStartServiceAfter", mapOf("action" to serviceIntent.action))
             TraceLog.d("BootReceiverWakeLockBefore", mapOf("action" to serviceIntent.action))
             HeadlessJsTaskService.acquireWakeLockNow(context)

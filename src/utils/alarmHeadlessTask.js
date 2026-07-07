@@ -9,6 +9,7 @@ import {
   markScheduledAlarmCancelled,
 } from '../database/scheduledAlarmDB';
 import { computeTargetAlarmTimestamp, rearmAllScheduledAlarmsAfterBoot } from './alarmScheduler';
+import { runExpiryCheck } from './schedulerEngine';
 import { handleError } from './errorHandler';
 import { debugTrace, debugTraceError, debugTraceDuration, generateTraceId } from './debugTrace';
 
@@ -197,5 +198,30 @@ export const RescheduleAlarmsTask = async () => {
     debugTraceError('RescheduleAlarmsTaskCatch', error, { traceId, function: 'RescheduleAlarmsTask' });
     handleError(error, 'RescheduleAlarmsTask');
     debugTraceDuration('RescheduleAlarmsTaskEnd', startTime, { traceId, outcome: 'error' });
+  }
+};
+
+/**
+ * SafetyNetTask
+ *
+ * Triggered by ExpirySafetyNetWorker (native WorkManager, ~15 min cadence).
+ * Reuses the exact same runExpiryCheck() the app already runs on foreground
+ * startup/resume/interval — this is intentional: it means "due but never
+ * queued" and "queued but stuck" contacts get caught the same way whether
+ * the app is open or fully killed, with one code path to maintain.
+ */
+export const SafetyNetTask = async () => {
+  const startTime = Date.now();
+  const traceId = generateTraceId('safetyNet');
+  debugTrace('SafetyNetTaskStart', { traceId, status: 'starting' });
+  try {
+    const summary = await runExpiryCheck(traceId);
+    debugTraceDuration('SafetyNetTaskEnd', startTime, {
+      traceId, outcome: 'completed', summary: JSON.stringify(summary ?? {}),
+    });
+  } catch (error) {
+    debugTraceError('SafetyNetTaskCatch', error, { traceId, function: 'SafetyNetTask' });
+    handleError(error, 'SafetyNetTask');
+    debugTraceDuration('SafetyNetTaskEnd', startTime, { traceId, outcome: 'error' });
   }
 };

@@ -9,6 +9,11 @@ export const QUEUE_STATUS = {
   FAILED: 'FAILED',
 };
 
+// Helper to get current UTC ISO timestamp (with 'Z' suffix)
+const getCurrentUtcISO = () => {
+  return new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+};
+
 const getQueueRowById = (db, id) => {
   const result = db.execute('SELECT * FROM message_queue WHERE id = ?;', [id]);
   return result.rows?._array?.[0] ?? null;
@@ -128,6 +133,8 @@ export const addToQueueDetailed = (contactId, templateId, platformId, traceId = 
     }
 
     const id = `${contactId}_${templateId}_${Date.now()}`;
+    const createdAtISO = getCurrentUtcISO(); // Use proper UTC ISO format
+    
     debugTraceDbWrite('AddToQueueInsert', {
       table: 'message_queue',
       pk: id,
@@ -141,9 +148,9 @@ export const addToQueueDetailed = (contactId, templateId, platformId, traceId = 
     });
 
     db.execute(
-      `INSERT INTO message_queue (id, contact_id, template_id, platform_id, status)
-       VALUES (?, ?, ?, ?, 'PENDING');`,
-      [id, contactId, templateId, platformId],
+      `INSERT INTO message_queue (id, contact_id, template_id, platform_id, status, created_at)
+       VALUES (?, ?, ?, ?, 'PENDING', ?);`,
+      [id, contactId, templateId, platformId, createdAtISO],
     );
 
     debugTraceDuration('AddToQueueDetailedExit', startTime, {
@@ -325,6 +332,8 @@ export const markAsSent = (id, traceId = null) => {
     const db = getDB();
     const row = getQueueRowById(db, id);
     const alreadySentCount = row ? countPriorSends(db, row.contact_id, row.template_id) : 0;
+    const sentAtISO = getCurrentUtcISO(); // Use proper UTC ISO format
+    
     debugTraceDbWrite('MarkAsSentUpdate', {
       table: 'message_queue',
       pk: id,
@@ -336,8 +345,8 @@ export const markAsSent = (id, traceId = null) => {
       alreadySentCount,
     });
     db.execute(
-      `UPDATE message_queue SET status = 'SENT', sent_at = datetime('now') WHERE id = ?;`,
-      [id],
+      `UPDATE message_queue SET status = 'SENT', sent_at = ? WHERE id = ?;`,
+      [sentAtISO, id],
     );
     debugTrace('MarkAsSentEnd', {
       traceId,

@@ -1,13 +1,16 @@
 import React, { useState, useCallback } from 'react';
 import {
   View, Text, TouchableOpacity, TextInput, StyleSheet,
-  StatusBar, ScrollView, Alert, ActivityIndicator,
+  StatusBar, ScrollView, Alert, ActivityIndicator, NativeModules, Platform,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { getDefaultPlatform, setDefaultPlatform, getSmsPerHourLimit, setSmsPerHourLimit } from '../database/settingsDB';
 import { handleError, showError, showSuccess, ErrorMessages } from '../utils/errorHandler';
 import { runExpiryCheck } from '../utils/scheduler';
 import { hasWhatsAppCredentials } from '../utils/whatsappService';
+import { canScheduleExactAlarms } from '../utils/alarmScheduler';
+
+const { AlarmModule } = NativeModules;
 
 const PLATFORM_OPTIONS = [
   { id: 'sms',      name: 'SMS',      icon: '📱' },
@@ -21,6 +24,8 @@ export default function SettingsScreen({ navigation }) {
   const [runningCheck, setRunningCheck]             = useState(false);
   const [waConfigured, setWaConfigured]             = useState(false);
   const [smsPerHour, setSmsPerHourState]            = useState('300');
+  const [exactAlarmGranted, setExactAlarmGranted]   = useState(true);
+  const [batteryExempt, setBatteryExempt]           = useState(true);
 
   const loadSettings = async () => {
     try {
@@ -28,10 +33,32 @@ export default function SettingsScreen({ navigation }) {
       setSmsPerHourState(String(getSmsPerHourLimit()));
       const configured = await hasWhatsAppCredentials();
       setWaConfigured(configured);
+
+      // Re-check every time this screen is focused, not just at app cold
+      // start — the user can revoke either permission from system Settings
+      // at any point, and the app has no other way to notice that happened.
+      if (Platform.OS === 'android') {
+        const [exactGranted, ignoringBattery] = await Promise.all([
+          canScheduleExactAlarms(),
+          AlarmModule?.isIgnoringBatteryOptimizations
+            ? AlarmModule.isIgnoringBatteryOptimizations()
+            : Promise.resolve(true),
+        ]);
+        setExactAlarmGranted(exactGranted);
+        setBatteryExempt(ignoringBattery);
+      }
     } catch (error) {
       handleError(error, 'SettingsScreen.loadSettings');
       showError('Error', ErrorMessages.DB_READ);
     }
+  };
+
+  const handleFixExactAlarm = () => {
+    AlarmModule?.openExactAlarmSettings?.();
+  };
+
+  const handleFixBattery = () => {
+    AlarmModule?.requestIgnoreBatteryOptimizations?.();
   };
 
   useFocusEffect(
@@ -136,6 +163,53 @@ export default function SettingsScreen({ navigation }) {
         <Text style={styles.noDefaultText}>
           No default set — SMS will be used as fallback.
         </Text>
+      )}
+
+      {/* ── Background Reliability ── */}
+      {Platform.OS === 'android' && (!exactAlarmGranted || !batteryExempt) && (
+        <>
+          <Text style={[styles.sectionLabel, { marginTop: 28 }]}>BACKGROUND RELIABILITY</Text>
+          <Text style={styles.sectionHint}>
+            These must stay on or reminders may fire late or not at all when the app is closed.
+          </Text>
+
+          {!exactAlarmGranted && (
+            <TouchableOpacity
+              style={[styles.card, styles.waCard]}
+              onPress={handleFixExactAlarm}
+              activeOpacity={0.7}>
+              <View style={styles.iconContainer}>
+                <Text style={styles.icon}>⏰</Text>
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.label}>Alarms & Reminders</Text>
+                <Text style={[styles.waStatus, styles.waStatusOff]}>⚠️ Not allowed — tap to fix</Text>
+              </View>
+              <Text style={styles.chevron}>›</Text>
+            </TouchableOpacity>
+          )}
+
+          {!batteryExempt && (
+            <TouchableOpacity
+              style={[styles.card, styles.waCard]}
+              onPress={handleFixBattery}
+              activeOpacity={0.7}>
+              <View style={styles.iconContainer}>
+                <Text style={styles.icon}>🔋</Text>
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.label}>Battery Optimization</Text>
+                <Text style={[styles.waStatus, styles.waStatusOff]}>⚠️ Restricted — tap to fix</Text>
+              </View>
+              <Text style={styles.chevron}>›</Text>
+            </TouchableOpacity>
+          )}
+
+          <Text style={styles.noDefaultText}>
+            Some phone brands (Xiaomi, Vivo, Oppo, Infinix, Tecno) also need "Autostart" allowed
+            manually in their own battery settings — check your phone's Settings → Battery → Autostart.
+          </Text>
+        </>
       )}
 
       {/* ── WhatsApp API Config ── */}

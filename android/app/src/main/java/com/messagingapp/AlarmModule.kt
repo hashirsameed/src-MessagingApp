@@ -103,6 +103,7 @@ class AlarmModule(reactContext: ReactApplicationContext) :
                 mapOf("contactId" to contactId, "templateId" to templateId, "requestCode" to code),
             )
             promise.resolve("SCHEDULED")
+            NextMessageWidgetProvider.refreshAll(context)
             TraceLog.d(
                 "AlarmModuleScheduleExactAlarmResolved",
                 mapOf("contactId" to contactId, "templateId" to templateId, "requestCode" to code, "result" to "SCHEDULED"),
@@ -139,6 +140,7 @@ class AlarmModule(reactContext: ReactApplicationContext) :
             alarmManager.cancel(pendingIntent)
             pendingIntent.cancel()
             promise.resolve(true)
+            NextMessageWidgetProvider.refreshAll(context)
             TraceLog.d(
                 "AlarmModuleCancelExactAlarmResolved",
                 mapOf("contactId" to contactId, "templateId" to templateId, "requestCode" to code, "result" to true),

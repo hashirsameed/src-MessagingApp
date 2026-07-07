@@ -6,6 +6,10 @@ import com.facebook.react.ReactApplication
 import com.facebook.react.ReactHost
 import com.facebook.react.ReactNativeApplicationEntryPoint.loadReactNative
 import com.facebook.react.defaults.DefaultReactHost.getDefaultReactHost
+import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.PeriodicWorkRequestBuilder
+import androidx.work.WorkManager
+import java.util.concurrent.TimeUnit
 
 class MainApplication : Application(), ReactApplication {
 
@@ -24,5 +28,21 @@ class MainApplication : Application(), ReactApplication {
   override fun onCreate() {
     super.onCreate()
     loadReactNative(this)
+    scheduleSafetyNetWorker()
+  }
+
+  /**
+   * 15 minutes is the minimum interval Android allows for PeriodicWorkRequest.
+   * KEEP policy means re-enqueuing on every process start (app open, boot,
+   * headless task start) is a no-op if the job is already scheduled — this
+   * never duplicates or resets the existing schedule.
+   */
+  private fun scheduleSafetyNetWorker() {
+    val request = PeriodicWorkRequestBuilder<ExpirySafetyNetWorker>(15, TimeUnit.MINUTES).build()
+    WorkManager.getInstance(this).enqueueUniquePeriodicWork(
+      "expiry_safety_net_worker",
+      ExistingPeriodicWorkPolicy.KEEP,
+      request,
+    )
   }
 }

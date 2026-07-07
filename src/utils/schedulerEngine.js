@@ -5,7 +5,7 @@ import { getDefaultPlatform } from '../database/settingsDB';
 import { getDaysUntilExpiry, findMatchingTemplates } from './templateMatcher';
 import { handleError } from './errorHandler';
 import { processQueue } from './queueProcessor';
-import { isTemplateAlarmDue } from './alarmScheduler';
+import { isTemplateAlarmDue, computeTargetAlarmTimestamp } from './alarmScheduler';
 import { debugTrace, debugTraceError, debugTraceDuration, generateTraceId } from './debugTrace';
 
 // No lower bound — overdue contacts from any point in the past are still
@@ -13,6 +13,11 @@ import { debugTrace, debugTraceError, debugTraceDuration, generateTraceId } from
 // stays generous to cover long before-expiry windows too.
 const FAR_PAST_YEARS   = 20;
 const FAR_FUTURE_YEARS = 2;
+
+// Maximum grace period (in ms) after a template's exact send_time during which
+// it is still eligible to be picked up by the scheduler. This prevents a 
+// template scheduled for 5 PM from being picked up at 8 PM.
+const MAX_TEMPLATE_GRACE_PERIOD_MS = 60 * 60 * 1000; // 1 hour
 
 export const runExpiryCheck = async (parentTraceId = null) => {
   const startTime = Date.now();
@@ -38,17 +43,39 @@ export const runExpiryCheck = async (parentTraceId = null) => {
 
     let queued            = 0;
     let skippedNoTemplate = 0;
+    let skippedTimeWindow = 0;
+    const nowMs = Date.now();
 
     expiringContacts.forEach((contact) => {
       const daysLeft = getDaysUntilExpiry(contact.expiry_datetime);
-      // Date match (days_before) alone is not enough — the target
-      // date+time (from send_time, or the expiry's own time-of-day if
-      // send_time isn't set) must have actually arrived. Previously this
-      // check was skipped entirely whenever send_time was blank, so a
-      // date match alone would fire regardless of time.
-      const matched  = findMatchingTemplates(templates, daysLeft).filter((template) =>
-        isTemplateAlarmDue(contact, template),
-      );
+      
+      const matched  = findMatchingTemplates(templates, daysLeft).filter((template) => {
+        // 1. The alarm time must have arrived (existing logic)
+        if (!isTemplateAlarmDue(contact, template, nowMs)) return false;
+        
+        // 2. STRICT TIME WINDOW CHECK:
+        // Only pick this template if its scheduled time is within the grace period.
+        // This ensures that if multiple templates exist for the same days_before,
+        // ONLY the one whose exact send_time has recently arrived is picked.
+        const alarmMs = computeTargetAlarmTimestamp(contact, template);
+        if (alarmMs === null) return false;
+        
+        const timeSinceAlarm = nowMs - alarmMs;
+        const inWindow = timeSinceAlarm >= 0 && timeSinceAlarm <= MAX_TEMPLATE_GRACE_PERIOD_MS;
+        
+        debugTrace('TemplateTimeWindowCheck', {
+          traceId,
+          contactId: contact.id,
+          templateId: template.id,
+          templateTitle: template.title,
+          sendTime: template.send_time ?? 'expiry',
+          alarmMs,
+          timeSinceAlarmMs: timeSinceAlarm,
+          inWindow,
+        });
+        
+        return inWindow;
+      });
 
       debugTrace('ExpiryCheckContactEvaluated', {
         traceId,
@@ -61,8 +88,22 @@ export const runExpiryCheck = async (parentTraceId = null) => {
       });
 
       if (matched.length === 0) {
-        skippedNoTemplate += 1;
-        debugTrace('ExpiryCheckContactSkipped', { traceId, contactId: contact.id, exitReason: 'no_matching_template' });
+        // Check if it was skipped due to time window
+        const allDueTemplates = findMatchingTemplates(templates, daysLeft).filter((t) => 
+          isTemplateAlarmDue(contact, t, nowMs)
+        );
+        if (allDueTemplates.length > 0) {
+          skippedTimeWindow += allDueTemplates.length;
+          debugTrace('ExpiryCheckContactSkippedTimeWindow', { 
+            traceId, 
+            contactId: contact.id, 
+            exitReason: 'outside_time_window',
+            dueButSkippedCount: allDueTemplates.length,
+          });
+        } else {
+          skippedNoTemplate += 1;
+          debugTrace('ExpiryCheckContactSkipped', { traceId, contactId: contact.id, exitReason: 'no_matching_template' });
+        }
         return;
       }
 
@@ -81,7 +122,13 @@ export const runExpiryCheck = async (parentTraceId = null) => {
       });
     });
 
-    debugTrace('RunExpiryCheckSummary', { traceId, queued, skippedNoTemplate, checked: expiringContacts.length });
+    debugTrace('RunExpiryCheckSummary', { 
+      traceId, 
+      queued, 
+      skippedNoTemplate, 
+      skippedTimeWindow,
+      checked: expiringContacts.length 
+    });
 
     if (queued > 0) {
       debugTrace('RunExpiryCheckAutoProcessQueueBefore', { traceId });
@@ -91,12 +138,19 @@ export const runExpiryCheck = async (parentTraceId = null) => {
       });
     }
 
-    debugTraceDuration('RunExpiryCheckEnd', startTime, { traceId, outcome: 'completed', queued, skippedNoTemplate });
-    return { checked: expiringContacts.length, queued, skippedNoTemplate };
+    debugTraceDuration('RunExpiryCheckEnd', startTime, { 
+      traceId, 
+      outcome: 'completed', 
+      queued, 
+      skippedNoTemplate,
+      skippedTimeWindow,
+    });
+    
+    return { checked: expiringContacts.length, queued, skippedNoTemplate, skippedTimeWindow };
   } catch (error) {
     debugTraceError('RunExpiryCheckCatch', error, { function: 'runExpiryCheck', traceId });
     handleError(error, 'runExpiryCheck');
     debugTraceDuration('RunExpiryCheckEnd', startTime, { traceId, outcome: 'error' });
-    return { checked: 0, queued: 0, skippedNoTemplate: 0 };
+    return { checked: 0, queued: 0, skippedNoTemplate: 0, skippedTimeWindow: 0 };
   }
 };

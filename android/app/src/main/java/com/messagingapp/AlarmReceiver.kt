@@ -4,6 +4,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
+import android.os.PowerManager // Added missing import
 import com.facebook.react.HeadlessJsTaskService
 
 /**
@@ -38,13 +39,20 @@ class AlarmReceiver : BroadcastReceiver() {
         try {
             TraceLog.d(
                 "AlarmReceiverStartServiceBefore",
-                mapOf("contactId" to contactId, "templateId" to templateId, "requestCode" to requestCode),
+                mapOf("contactId" to contactId, "templateId" to templateId, "requestCode" to requestCode)
             )
+            
+            // Acquire wake lock BEFORE starting service to keep CPU awake
+            val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+            val wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MessagingApp:AlarmReceiver")
+            wakeLock.acquire(60 * 1000L) // 60 seconds
+
             context.startForegroundService(serviceIntent)
             TraceLog.d(
                 "AlarmReceiverStartServiceAfter",
                 mapOf("contactId" to contactId, "templateId" to templateId, "requestCode" to requestCode),
             )
+            
             TraceLog.d(
                 "AlarmReceiverWakeLockBefore",
                 mapOf("contactId" to contactId, "templateId" to templateId, "requestCode" to requestCode),

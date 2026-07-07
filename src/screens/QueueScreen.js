@@ -15,10 +15,11 @@ import { useFocusEffect } from '@react-navigation/native';
 import {
   getAllQueue,
   removeFromQueue,
-  markAsFailed,
+  revertToPending,
 } from '../database/messageQueueDB';
 import { getAllContacts } from '../database/contactDB';
 import { getAllTemplates } from '../database/templateDB';
+import { processQueue } from '../utils/queueProcessor';
 import { formatDateTime12Hour } from '../utils/dateFormat';
 
 const TABS = ['PENDING', 'SENT', 'FAILED'];
@@ -30,15 +31,17 @@ const STATUS_META = {
 };
 
 /**
- * Only SMS items on Android get action buttons.
- * WhatsApp/Email/Gmail are fully automatic — no manual action needed.
- * iOS SMS uses Linking (user taps Send) — no retry button either.
+ * Allow retry for failed SMS (Android) and failed WhatsApp messages.
+ * WhatsApp messages can fail due to API errors, network issues, etc.,
+ * and can be safely retried.
  */
 const shouldShowRetry  = (item) =>
-  Platform.OS === 'android' && item.platform_id === 'sms' && item.status === 'FAILED';
+  item.status === 'FAILED' && 
+  (item.platform_id === 'sms' || item.platform_id === 'whatsapp');
 
 const shouldShowDelete = (item) =>
   item.status === 'PENDING' ||
+  item.status === 'FAILED' ||
   (Platform.OS === 'android' && item.platform_id === 'sms');
 
 export default function QueueScreen() {
@@ -47,6 +50,7 @@ export default function QueueScreen() {
   const [contactMap, setContactMap]     = useState({});
   const [templateMap, setTemplateMap]   = useState({});
   const [refreshing, setRefreshing]     = useState(false);
+  const [processing, setProcessing]     = useState(false);
 
   const loadData = useCallback(() => {
     const items     = getAllQueue();
@@ -65,10 +69,11 @@ export default function QueueScreen() {
 
   useFocusEffect(useCallback(() => { loadData(); }, [loadData]));
 
-  const onRefresh = useCallback(() => {
+  const onRefresh = useCallback(async () => {
     setRefreshing(true);
     loadData();
-    setRefreshing(false);
+    // Give a small delay so the refresh control animation is visible
+    setTimeout(() => setRefreshing(false), 500);
   }, [loadData]);
 
   const filteredItems = allItems.filter((i) => i.status === activeTab);
@@ -79,13 +84,28 @@ export default function QueueScreen() {
 
   const handleRetry = (item) => {
     Alert.alert(
-      'Retry SMS',
-      'Remove this item? Run Check Now in Settings to re-queue it.',
+      'Retry Message',
+      'Reset this message to Pending and attempt to send it again now?',
       [
         { text: 'Cancel', style: 'cancel' },
         {
-          text: 'Remove & Re-queue',
-          onPress: () => { removeFromQueue(item.id); loadData(); },
+          text: 'Retry Now',
+          onPress: async () => {
+            // 1. Revert the failed item back to PENDING
+            revertToPending(item.id);
+            loadData(); // Update UI immediately to show it as Pending
+            
+            // 2. Trigger queue processing in the background
+            setProcessing(true);
+            try {
+              await processQueue();
+            } catch (error) {
+              console.error('Error processing queue on retry:', error);
+            } finally {
+              setProcessing(false);
+              loadData(); // Refresh UI again after processing completes
+            }
+          },
         },
       ],
     );
@@ -167,7 +187,7 @@ export default function QueueScreen() {
           ? <Text style={styles.attemptText}>Attempts: {item.attempt_count}</Text>
           : null}
 
-        {/* Action buttons — only SMS on Android */}
+        {/* Action buttons */}
         {(showRetry || showDelete) && (
           <View style={styles.actionRow}>
             {showRetry && (
@@ -210,6 +230,14 @@ export default function QueueScreen() {
 
   return (
     <SafeAreaView style={styles.container}>
+      {/* Processing Indicator */}
+      {processing && (
+        <View style={styles.processingBar}>
+          <ActivityIndicator size="small" color="#1A1A2E" />
+          <Text style={styles.processingText}>Processing queue...</Text>
+        </View>
+      )}
+
       {/* Tabs */}
       <View style={styles.tabBar}>
         {TABS.map((tab) => {
@@ -253,6 +281,18 @@ export default function QueueScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#F8F9FC' },
+
+  processingBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 10,
+    backgroundColor: '#FFFBEB',
+    borderBottomWidth: 1,
+    borderBottomColor: '#FDE68A',
+    gap: 8,
+  },
+  processingText: { fontSize: 13, fontWeight: '600', color: '#D97706' },
 
   tabBar:       { flexDirection: 'row', backgroundColor: '#fff', borderBottomWidth: 1, borderBottomColor: '#F0F0F0' },
   tab:          { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 14, gap: 6 },
