@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef } from 'react';
-import { Text, AppState, Platform } from 'react-native';
+import { Text, AppState, Platform, NativeModules } from 'react-native';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
@@ -26,6 +26,21 @@ const Stack = createNativeStackNavigator();
 const Tab = createBottomTabNavigator();
 
 const FOREGROUND_CHECK_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
+
+// Background-trace notification — visible proof the engine keeps working
+// once the app leaves the foreground. Native side (AlarmModule) reads
+// scheduled_alarms directly, so no data needs to cross the bridge here.
+const { AlarmModule } = NativeModules;
+
+const showBackgroundTrace = () => {
+  if (Platform.OS !== 'android') return;
+  AlarmModule?.showBackgroundTraceNotification?.().catch(() => {});
+};
+
+const hideBackgroundTrace = () => {
+  if (Platform.OS !== 'android') return;
+  AlarmModule?.hideBackgroundTraceNotification?.().catch(() => {});
+};
 
 function MainTabs() {
   return (
@@ -137,11 +152,13 @@ export default function App() {
           console.log('[App] Returned to foreground');
           triggerExpiryCheck('foreground-resume');
           startForegroundInterval();
+          hideBackgroundTrace();
         }
 
         if (nextState.match(/inactive|background/)) {
           console.log('[App] Moved to background');
           stopForegroundInterval();
+          showBackgroundTrace();
         }
 
         appState.current = nextState;

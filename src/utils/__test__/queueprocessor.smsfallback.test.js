@@ -22,10 +22,12 @@ jest.mock('react-native', () => ({
   },
   Platform: { OS: 'android' },
   PermissionsAndroid: {
+    check: jest.fn(),
     request: jest.fn(),
     PERMISSIONS: { SEND_SMS: 'android.permission.SEND_SMS' },
     RESULTS: { GRANTED: 'granted' },
   },
+  AppState: { currentState: 'active' },
   // No SmsModule here on purpose — simulates the native module not being linked.
   NativeModules: {},
 }));

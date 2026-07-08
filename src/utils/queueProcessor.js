@@ -1,4 +1,4 @@
-import { Linking, Platform, PermissionsAndroid, NativeModules } from 'react-native';
+import { Linking, Platform, PermissionsAndroid, NativeModules, AppState } from 'react-native';
 import {
   claimPendingQueue, markAsSent, markAsFailed, revertToPending,
   countSmsSentInLastHour,
@@ -51,6 +51,32 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const requestSmsPermission = async () => {
   debugTrace('RequestSmsPermissionBefore', {});
   try {
+    // PermissionsAndroid.check() reads the current permission state directly
+    // from the OS — it does NOT need a foreground Activity. This is the path
+    // that must succeed when processQueue runs from a headless background
+    // task (alarm fired, safety-net worker): if the user already granted SMS
+    // permission once in foreground, check() correctly reports true here
+    // with zero UI involved.
+    const alreadyGranted = await PermissionsAndroid.check(
+      PermissionsAndroid.PERMISSIONS.SEND_SMS,
+    );
+    if (alreadyGranted) {
+      debugTrace('RequestSmsPermissionAfter', { granted: true, source: 'already_granted_check' });
+      return true;
+    }
+
+    // Not granted yet. PermissionsAndroid.request() shows a system dialog,
+    // which requires a foreground Activity — it reliably throws/rejects when
+    // called from a headless task with no Activity attached (background app,
+    // alarm-fired, safety-net). Attempting it there would just be a wasted
+    // exception, so only try it when the JS runtime is actually foregrounded.
+    if (AppState.currentState !== 'active') {
+      debugTrace('RequestSmsPermissionAfter', {
+        granted: false, source: 'not_granted_and_backgrounded', appState: AppState.currentState,
+      });
+      return false;
+    }
+
     const granted = await PermissionsAndroid.request(
       PermissionsAndroid.PERMISSIONS.SEND_SMS,
       {
@@ -61,7 +87,7 @@ const requestSmsPermission = async () => {
       },
     );
     const isGranted = granted === PermissionsAndroid.RESULTS.GRANTED;
-    debugTrace('RequestSmsPermissionAfter', { granted: isGranted, rawResult: granted });
+    debugTrace('RequestSmsPermissionAfter', { granted: isGranted, rawResult: granted, source: 'foreground_dialog' });
     return isGranted;
   } catch (error) {
     debugTraceError('RequestSmsPermissionCatch', error, { function: 'requestSmsPermission' });
