@@ -6,13 +6,8 @@ import android.appwidget.AppWidgetProvider
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.database.sqlite.SQLiteDatabase
 import android.os.Build
 import android.widget.RemoteViews
-import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Locale
-import java.util.TimeZone
 
 /**
  * NextMessageWidgetProvider
@@ -42,7 +37,6 @@ class NextMessageWidgetProvider : AppWidgetProvider() {
     }
 
     companion object {
-        private const val DB_FILE_NAME = "MessagingApp.db"
 
         /** Called from native code (not JS) whenever the scheduled set could have changed. */
         fun refreshAll(context: Context) {
@@ -59,23 +53,6 @@ class NextMessageWidgetProvider : AppWidgetProvider() {
             }
         }
 
-        private fun resolveDbFile(context: Context): File? {
-            // react-native-quick-sqlite (8.x) opens databases under the app's
-            // `files` directory on Android when no explicit `location` is
-            // passed — this app's db.js calls open({ name: 'MessagingApp.db' })
-            // with no location override.
-            val filesDirCandidate = File(context.filesDir, DB_FILE_NAME)
-            if (filesDirCandidate.exists()) return filesDirCandidate
-
-            // Fallback: some quick-sqlite versions/configs use the standard
-            // Android `databases` folder instead. Try both rather than
-            // guessing wrong and showing a blank widget forever.
-            val databasesDirCandidate = context.getDatabasePath(DB_FILE_NAME)
-            if (databasesDirCandidate.exists()) return databasesDirCandidate
-
-            return null
-        }
-
         private fun buildViews(context: Context): RemoteViews {
             val views = RemoteViews(context.packageName, R.layout.widget_next_message)
 
@@ -90,45 +67,23 @@ class NextMessageWidgetProvider : AppWidgetProvider() {
                 views.setOnClickPendingIntent(R.id.widget_contact_name, pendingIntent)
             }
 
-            try {
-                val dbFile = resolveDbFile(context) ?: run {
-                    setEmptyState(views, "Open app to set up reminders")
-                    return views
-                }
-
-                val db = SQLiteDatabase.openDatabase(
-                    dbFile.absolutePath, null, SQLiteDatabase.OPEN_READONLY,
-                )
-                db.use {
-                    val cursor = it.rawQuery(
-                        """
-                        SELECT c.name AS contact_name, t.title AS template_title, sa.trigger_at AS trigger_at
-                        FROM scheduled_alarms sa
-                        JOIN contacts c ON c.id = sa.contact_id
-                        JOIN templates t ON t.id = sa.template_id
-                        WHERE sa.status = 'scheduled'
-                        ORDER BY sa.trigger_at ASC
-                        LIMIT 1;
-                        """.trimIndent(),
-                        null,
-                    )
-                    cursor.use { c ->
-                        if (c.moveToFirst()) {
-                            val contactName = c.getString(c.getColumnIndexOrThrow("contact_name"))
-                            val templateTitle = c.getString(c.getColumnIndexOrThrow("template_title"))
-                            val triggerAt = c.getString(c.getColumnIndexOrThrow("trigger_at"))
-                            views.setTextViewText(R.id.widget_contact_name, contactName)
-                            views.setTextViewText(R.id.widget_template_title, templateTitle)
-                            views.setTextViewText(R.id.widget_trigger_time, formatPakistanTime(triggerAt))
-                        } else {
-                            setEmptyState(views, "No upcoming reminders")
-                        }
-                    }
-                }
-            } catch (error: Exception) {
-                TraceLog.e("NextMessageWidgetBuildViewsException", error, emptyMap())
-                setEmptyState(views, "Open app to refresh")
+            if (NextAlarmRepository.resolveDbFile(context) == null) {
+                setEmptyState(views, "Open app to set up reminders")
+                return views
             }
+
+            val next = NextAlarmRepository.queryNextAlarm(context)
+            if (next == null) {
+                setEmptyState(views, "No upcoming reminders")
+                return views
+            }
+
+            views.setTextViewText(R.id.widget_contact_name, next.contactName)
+            views.setTextViewText(R.id.widget_template_title, next.templateTitle)
+            views.setTextViewText(
+                R.id.widget_trigger_time,
+                NextAlarmRepository.formatPakistanTime(next.triggerAtIso),
+            )
 
             return views
         }
@@ -137,26 +92,6 @@ class NextMessageWidgetProvider : AppWidgetProvider() {
             views.setTextViewText(R.id.widget_contact_name, message)
             views.setTextViewText(R.id.widget_template_title, "")
             views.setTextViewText(R.id.widget_trigger_time, "")
-        }
-
-        /**
-         * trigger_at is stored as a UTC ISO instant (e.g. "2026-07-10T09:00:00Z").
-         * Displayed in Pakistan wall-clock time — fixed UTC+5, no DST — same
-         * convention as the rest of the app (see src/utils/pakistanTime.js).
-         */
-        private fun formatPakistanTime(triggerAtIso: String): String {
-            return try {
-                val parser = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply {
-                    timeZone = TimeZone.getTimeZone("UTC")
-                }
-                val date = parser.parse(triggerAtIso) ?: return ""
-                val formatter = SimpleDateFormat("d MMM, h:mm a", Locale.US).apply {
-                    timeZone = TimeZone.getTimeZone("Asia/Karachi")
-                }
-                formatter.format(date)
-            } catch (error: Exception) {
-                ""
-            }
         }
     }
 }

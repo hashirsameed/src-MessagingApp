@@ -218,6 +218,124 @@ export const markScheduledAlarmFired = (contactId, templateId) => {
   }
 };
 
+/**
+ * claimScheduledAlarmForFiring — atomic CAS guard.
+ *
+ * Single gatekeeper every trigger source (AlarmReceiver, ExpirySafetyNetWorker,
+ * BootReceiver-driven reschedule) must pass through before touching
+ * messageQueueDB. The UPDATE only succeeds if the row is still 'scheduled'
+ * at the moment of the call. Returns { claimed, row }.
+ */
+export const claimScheduledAlarmForFiring = (contactId, templateId) => {
+  debugTrace('ClaimScheduledAlarmStart', { contactId, templateId });
+  try {
+    const db = getDB();
+    const id = makeId(contactId, templateId);
+
+    const before = db.execute('SELECT * FROM scheduled_alarms WHERE id = ?;', [id])
+      .rows?._array?.[0] || null;
+
+    if (!before) {
+      debugTrace('ClaimScheduledAlarmMiss', { contactId, templateId, reason: 'row_not_found' });
+      return { claimed: false, row: null };
+    }
+
+    const result = db.execute(
+      `UPDATE scheduled_alarms
+       SET status = 'firing', updated_at = datetime('now')
+       WHERE id = ? AND status = 'scheduled';`,
+      [id],
+    );
+
+    const rowsAffected = result?.rowsAffected ?? 0;
+
+    debugTraceDbWrite('ClaimScheduledAlarmCAS', {
+      table: 'scheduled_alarms',
+      pk: id,
+      oldState: before.status,
+      newState: rowsAffected > 0 ? 'firing' : before.status,
+      rowsAffected,
+      contactId,
+      templateId,
+    });
+
+    if (rowsAffected === 0) {
+      debugTrace('ClaimScheduledAlarmSkip', {
+        contactId, templateId, reason: 'already_claimed_or_not_scheduled', currentStatus: before.status,
+      });
+      return { claimed: false, row: before };
+    }
+
+    const after = db.execute('SELECT * FROM scheduled_alarms WHERE id = ?;', [id])
+      .rows?._array?.[0] || null;
+
+    debugTrace('ClaimScheduledAlarmEnd', { contactId, templateId, claimed: true });
+    return { claimed: true, row: after };
+  } catch (error) {
+    debugTraceError('ClaimScheduledAlarmCatch', error, {
+      function: 'claimScheduledAlarmForFiring', contactId, templateId,
+    });
+    handleError(error, 'claimScheduledAlarmForFiring');
+    return { claimed: false, row: null };
+  }
+};
+
+/**
+ * releaseScheduledAlarmClaim — reverts a 'firing' claim back to 'scheduled'.
+ * Only used when a claimed alarm fails to queue for a transient reason
+ * (DB error, etc.) so the safety-net worker can retry it later instead of
+ * the row being stuck permanently in 'firing'.
+ */
+export const releaseScheduledAlarmClaim = (contactId, templateId) => {
+  try {
+    const db = getDB();
+    const id = makeId(contactId, templateId);
+    const result = db.execute(
+      `UPDATE scheduled_alarms SET status = 'scheduled', updated_at = datetime('now')
+       WHERE id = ? AND status = 'firing';`,
+      [id],
+    );
+    debugTrace('ReleaseScheduledAlarmClaim', {
+      contactId, templateId, rowsAffected: result?.rowsAffected ?? 0,
+    });
+    return (result?.rowsAffected ?? 0) > 0;
+  } catch (error) {
+    debugTraceError('ReleaseScheduledAlarmClaimCatch', error, {
+      function: 'releaseScheduledAlarmClaim', contactId, templateId,
+    });
+    handleError(error, 'releaseScheduledAlarmClaim');
+    return false;
+  }
+};
+
+/**
+ * getNextUpcomingAlarm — read-only, part of the engine's published UI
+ * interface. Used by notification builder, widget (Kotlin mirrors this
+ * same query independently), and Settings/status screens. Never call from
+ * write paths.
+ */
+export const getNextUpcomingAlarm = () => {
+  try {
+    const db = getDB();
+    const result = db.execute(
+      `
+      SELECT sa.contact_id, sa.template_id, sa.trigger_at,
+             c.name AS contact_name, t.title AS template_title
+      FROM scheduled_alarms sa
+      JOIN contacts c ON c.id = sa.contact_id
+      JOIN templates t ON t.id = sa.template_id
+      WHERE sa.status = 'scheduled'
+      ORDER BY sa.trigger_at ASC
+      LIMIT 1;
+      `,
+    );
+    return result.rows?._array?.[0] || null;
+  } catch (error) {
+    handleError(error, 'getNextUpcomingAlarm');
+    return null;
+  }
+};
+
 export const cancelAllScheduledAlarmsForContact = (contactId) => {
   try {
     const db = getDB();

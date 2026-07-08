@@ -4,10 +4,12 @@ import { getDefaultPlatform } from '../database/settingsDB';
 import { addToQueueDetailed } from '../database/messageQueueDB';
 import { processQueue } from './queueProcessor';
 import {
-  getScheduledAlarm,
+  claimScheduledAlarmForFiring,
+  releaseScheduledAlarmClaim,
   markScheduledAlarmFired,
   markScheduledAlarmCancelled,
 } from '../database/scheduledAlarmDB';
+import { recordEngineRun } from '../database/engineStatusDB';
 import { computeTargetAlarmTimestamp, rearmAllScheduledAlarmsAfterBoot } from './alarmScheduler';
 import { runExpiryCheck } from './schedulerEngine';
 import { handleError } from './errorHandler';
@@ -40,25 +42,31 @@ export const AlarmFiredTask = async (data) => {
       return;
     }
 
-    debugTrace('LoadScheduledAlarmBefore', { traceId, contactId, templateId, requestCode });
-    const alarmRow = getScheduledAlarm(contactId, templateId);
-    debugTrace('LoadScheduledAlarmAfter', {
+    // Atomic CAS guard — this is what makes it safe for AlarmReceiver,
+    // ExpirySafetyNetWorker, and a post-boot reschedule to all potentially
+    // reach this same (contactId, templateId) pair. Only the caller that
+    // wins the 'scheduled' -> 'firing' transition proceeds; everyone else
+    // bails here with zero side effects. This is the fix for the
+    // duplicate-send-on-reopen and safety-net-resends-already-sent bugs.
+    debugTrace('ClaimAlarmBefore', { traceId, contactId, templateId, requestCode });
+    const { claimed, row: alarmRow } = claimScheduledAlarmForFiring(contactId, templateId);
+    debugTrace('ClaimAlarmAfter', {
       traceId,
       contactId,
       templateId,
       requestCode,
-      found: !!alarmRow,
+      claimed,
       status: alarmRow?.status ?? 'not_found',
       triggerAt: alarmRow?.trigger_at ?? '',
     });
 
-    if (!alarmRow || alarmRow.status !== 'scheduled') {
+    if (!claimed) {
       debugTraceDuration('AlarmFiredTaskExit', startTime, {
         traceId,
         contactId,
         templateId,
         requestCode,
-        exitReason: 'no_active_scheduled_alarm_row',
+        exitReason: 'already_claimed_or_no_active_row',
         status: alarmRow?.status ?? 'not_found',
       });
       return;
@@ -157,6 +165,10 @@ export const AlarmFiredTask = async (data) => {
       });
       markScheduledAlarmFired(contactId, templateId);
     } else {
+      // Transient failure (e.g. DB error inside addToQueueDetailed) — release
+      // the claim back to 'scheduled' so the safety-net worker can retry
+      // this pair later instead of it being stuck in 'firing' forever.
+      releaseScheduledAlarmClaim(contactId, templateId);
       debugTrace('AlarmFiredTaskExit', {
         traceId,
         contactId,
@@ -165,14 +177,16 @@ export const AlarmFiredTask = async (data) => {
         exitReason: 'queue_db_error',
         reason,
         status: 'scheduled',
-        note: 'leaving_for_fallback_recovery',
+        note: 'claim_released_for_fallback_recovery',
       });
     }
 
+    recordEngineRun('alarmFired', { traceId, contactId, templateId, itemsProcessed: added ? 1 : 0 });
     debugTraceDuration('AlarmFiredTaskEnd', startTime, {
       traceId, contactId, templateId, requestCode, outcome: 'completed',
     });
   } catch (error) {
+    releaseScheduledAlarmClaim(contactId, templateId);
     debugTraceError('AlarmFiredTaskCatch', error, {
       traceId, function: 'AlarmFiredTask', contactId, templateId, requestCode,
     });
@@ -191,6 +205,7 @@ export const RescheduleAlarmsTask = async () => {
     debugTrace('RearmAllScheduledAlarmsBefore', { traceId });
     const rearmed = await rearmAllScheduledAlarmsAfterBoot();
     debugTrace('RearmAllScheduledAlarmsAfter', { traceId, rearmedCount: rearmed });
+    recordEngineRun('bootReschedule', { traceId, itemsProcessed: rearmed ?? 0 });
     debugTraceDuration('RescheduleAlarmsTaskEnd', startTime, {
       traceId, outcome: 'completed', rearmedCount: rearmed,
     });
@@ -216,6 +231,7 @@ export const SafetyNetTask = async () => {
   debugTrace('SafetyNetTaskStart', { traceId, status: 'starting' });
   try {
     const summary = await runExpiryCheck(traceId);
+    recordEngineRun('safetyNet', { traceId, itemsProcessed: summary?.queued ?? 0 });
     debugTraceDuration('SafetyNetTaskEnd', startTime, {
       traceId, outcome: 'completed', summary: JSON.stringify(summary ?? {}),
     });

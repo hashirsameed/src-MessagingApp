@@ -162,6 +162,7 @@ class AlarmTaskService : HeadlessJsTaskService() {
     override fun onDestroy() {
         TraceLog.d("AlarmTaskServiceOnDestroy", emptyMap())
         NextMessageWidgetProvider.refreshAll(applicationContext)
+        ReminderNotificationHelper.postOrUpdate(applicationContext)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE)
         } else {

@@ -104,6 +104,7 @@ class AlarmModule(reactContext: ReactApplicationContext) :
             )
             promise.resolve("SCHEDULED")
             NextMessageWidgetProvider.refreshAll(context)
+            ReminderNotificationHelper.postOrUpdate(context)
             TraceLog.d(
                 "AlarmModuleScheduleExactAlarmResolved",
                 mapOf("contactId" to contactId, "templateId" to templateId, "requestCode" to code, "result" to "SCHEDULED"),
@@ -141,6 +142,7 @@ class AlarmModule(reactContext: ReactApplicationContext) :
             pendingIntent.cancel()
             promise.resolve(true)
             NextMessageWidgetProvider.refreshAll(context)
+            ReminderNotificationHelper.postOrUpdate(context)
             TraceLog.d(
                 "AlarmModuleCancelExactAlarmResolved",
                 mapOf("contactId" to contactId, "templateId" to templateId, "requestCode" to code, "result" to true),
@@ -207,6 +209,39 @@ class AlarmModule(reactContext: ReactApplicationContext) :
             promise.resolve(result)
         } catch (error: Exception) {
             TraceLog.e("AlarmModuleIsIgnoringBatteryOptimizationsException", error)
+            promise.resolve(false)
+        }
+    }
+
+    /**
+     * Called from JS (App.tsx AppState listener) the moment the app
+     * transitions to 'background'. Posts the ongoing "engine active, next
+     * message to X at Y" notification — the visible trace that the
+     * background engine keeps working even with no screen open.
+     */
+    @ReactMethod
+    fun showBackgroundTraceNotification(promise: Promise) {
+        try {
+            ReminderNotificationHelper.postOrUpdate(reactApplicationContext)
+            promise.resolve(true)
+        } catch (error: Exception) {
+            TraceLog.e("AlarmModuleShowBackgroundTraceNotificationException", error)
+            promise.resolve(false)
+        }
+    }
+
+    /**
+     * Called from JS when the app returns to 'active' — the UI itself is
+     * proof of life at that point, so the background-trace notification
+     * is no longer needed.
+     */
+    @ReactMethod
+    fun hideBackgroundTraceNotification(promise: Promise) {
+        try {
+            ReminderNotificationHelper.cancel(reactApplicationContext)
+            promise.resolve(true)
+        } catch (error: Exception) {
+            TraceLog.e("AlarmModuleHideBackgroundTraceNotificationException", error)
             promise.resolve(false)
         }
     }
