@@ -175,7 +175,7 @@ export default function QueueScreen() {
         </View>
 
         {/* Error */}
-        {item.error_reason ? (
+        {item.status === 'FAILED' && item.error_reason ? (
           <View style={styles.errorBox}>
             <Text style={styles.errorText}>
               ⚠ {item.error_reason.replace(/_/g, ' ')}

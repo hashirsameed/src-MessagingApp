@@ -1,3 +1,5 @@
+jest.unmock('react-native');
+
 import { StyleSheet } from 'react-native';
 
 test('StyleSheet.create exists', () => {

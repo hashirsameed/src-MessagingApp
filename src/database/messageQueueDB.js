@@ -345,7 +345,7 @@ export const markAsSent = (id, traceId = null) => {
       alreadySentCount,
     });
     db.execute(
-      `UPDATE message_queue SET status = 'SENT', sent_at = ? WHERE id = ?;`,
+      `UPDATE message_queue SET status = 'SENT', sent_at = ?, error_reason = NULL WHERE id = ?;`,
       [sentAtISO, id],
     );
     debugTrace('MarkAsSentEnd', {

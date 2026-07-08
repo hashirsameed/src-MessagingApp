@@ -39,6 +39,10 @@ jest.mock('../queueProcessor', () => ({
 
 jest.mock('../alarmScheduler', () => ({
   isTemplateAlarmDue: jest.fn(),
+  // Returns a timestamp a few seconds in the past relative to whenever it's
+  // called, so any template that passes isTemplateAlarmDue also falls
+  // inside runExpiryCheck's 1-hour grace-period window by default.
+  computeTargetAlarmTimestamp: jest.fn(() => Date.now() - 5000),
 }));
 
 jest.mock('../debugTrace', () => ({
@@ -62,7 +66,7 @@ describe('runExpiryCheck', () => {
 
     const result = await runExpiryCheck();
 
-    expect(result).toEqual({ checked: 0, queued: 0, skippedNoTemplate: 0 });
+    expect(result).toEqual({ checked: 0, queued: 0, skippedNoTemplate: 0, skippedTimeWindow: 0 });
     expect(addToQueue).not.toHaveBeenCalled();
     expect(processQueue).not.toHaveBeenCalled();
   });
@@ -79,7 +83,7 @@ describe('runExpiryCheck', () => {
     const result = await runExpiryCheck();
 
     expect(addToQueue).toHaveBeenCalledWith(1, 1, 'sms');
-    expect(result).toEqual({ checked: 1, queued: 1, skippedNoTemplate: 0 });
+    expect(result).toEqual({ checked: 1, queued: 1, skippedNoTemplate: 0, skippedTimeWindow: 0 });
     expect(processQueue).toHaveBeenCalledWith(undefined, expect.any(String));
   });
 
@@ -94,7 +98,7 @@ describe('runExpiryCheck', () => {
     const result = await runExpiryCheck();
 
     expect(addToQueue).not.toHaveBeenCalled();
-    expect(result).toEqual({ checked: 1, queued: 0, skippedNoTemplate: 1 });
+    expect(result).toEqual({ checked: 1, queued: 0, skippedNoTemplate: 1, skippedTimeWindow: 0 });
     expect(processQueue).not.toHaveBeenCalled();
   });
 
@@ -107,7 +111,7 @@ describe('runExpiryCheck', () => {
     const result = await runExpiryCheck();
 
     expect(isTemplateAlarmDue).not.toHaveBeenCalled();
-    expect(result).toEqual({ checked: 1, queued: 0, skippedNoTemplate: 1 });
+    expect(result).toEqual({ checked: 1, queued: 0, skippedNoTemplate: 1, skippedTimeWindow: 0 });
   });
 
   test('counts only the templates addToQueue actually accepts, ignoring ones already queued (dedup)', async () => {
@@ -135,7 +139,7 @@ describe('runExpiryCheck', () => {
     const result = await runExpiryCheck();
 
     expect(handleError).toHaveBeenCalledWith(expect.any(Error), 'runExpiryCheck');
-    expect(result).toEqual({ checked: 0, queued: 0, skippedNoTemplate: 0 });
+    expect(result).toEqual({ checked: 0, queued: 0, skippedNoTemplate: 0, skippedTimeWindow: 0 });
     expect(processQueue).not.toHaveBeenCalled();
   });
 
