@@ -32,10 +32,10 @@ import android.os.Build
  */
 object ReminderNotificationHelper {
 
-    private const val CHANNEL_ID = "background_trace_channel"
-    private const val NOTIFICATION_ID = 4272
+    const val CHANNEL_ID = "background_trace_channel"
+    const val NOTIFICATION_ID = 4272
 
-    private fun ensureChannel(context: Context) {
+    fun ensureChannel(context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val manager = context.getSystemService(NotificationManager::class.java)
             if (manager?.getNotificationChannel(CHANNEL_ID) == null) {
@@ -52,18 +52,12 @@ object ReminderNotificationHelper {
         }
     }
 
-    /** Exposed so PersistentReminderService can reuse the exact same channel id
-     *  when calling startForeground() — one channel, one notification id, no
-     *  duplicate notifications between the ongoing-trace path and the
-     *  persistent-service path. */
-    const val NOTIFICATION_ID_PUBLIC = NOTIFICATION_ID
-
     /**
-     * Builds (but does not post) the ongoing background-trace notification.
-     * Extracted so both postOrUpdate() (fire-and-forget update) and
-     * PersistentReminderService (which must pass a Notification into
-     * startForeground()) share one source of truth for title/body/intent —
-     * no drift between the two notification surfaces.
+     * Builds (without posting) the ongoing background-trace notification.
+     * Public so PersistentReminderService can pass the exact same
+     * Notification object into startForeground() — one notification
+     * definition, two callers (plain NotificationManager.notify, and
+     * a foreground service), impossible for them to drift apart.
      */
     fun buildNotification(context: Context): Notification {
         ensureChannel(context)
@@ -101,22 +95,34 @@ object ReminderNotificationHelper {
         return builder.build()
     }
 
-    /** Builds and posts (or updates) the ongoing background-trace notification. */
+    /**
+     * Builds and posts (or updates) the ongoing background-trace notification
+     * via plain NotificationManager — used by the short-lived call sites
+     * (alarm scheduled/cancelled, AlarmTaskService finishing a headless
+     * task) that don't own a running foreground service themselves.
+     * PersistentReminderService instead calls buildNotification() directly
+     * and passes it to startForeground()/notify() itself, since a
+     * foreground-service-owned notification must be posted through the
+     * service's own startForeground() call, not a bare notify().
+     */
     fun postOrUpdate(context: Context) {
         try {
             val manager = context.getSystemService(NotificationManager::class.java) ?: return
             val notification = buildNotification(context)
             manager.notify(NOTIFICATION_ID, notification)
-            TraceLog.d(
-                "BackgroundTraceNotificationPosted",
-                mapOf("hasNextAlarm" to true),
-            )
+            TraceLog.d("BackgroundTraceNotificationPosted", emptyMap())
         } catch (error: Exception) {
             TraceLog.e("BackgroundTraceNotificationException", error, emptyMap())
         }
     }
 
-    /** Called when the app returns to foreground — the UI itself is proof of life now. */
+    /**
+     * Called when the app returns to foreground while the persistent service
+     * is NOT running (e.g. persistent service disabled) — the UI itself is
+     * proof of life then. Has no effect while PersistentReminderService owns
+     * the notification, since a foreground service's notification can only
+     * be removed by the service itself (stopForeground/stopSelf).
+     */
     fun cancel(context: Context) {
         try {
             val manager = context.getSystemService(NotificationManager::class.java)

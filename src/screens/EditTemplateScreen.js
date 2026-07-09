@@ -9,6 +9,7 @@ import { rescheduleAlarmsForTemplate } from '../utils/alarmScheduler';
 import { handleError, showError, showSuccess, ErrorMessages } from '../utils/errorHandler';
 import { validateTemplateTitle, validateTemplateBody, validateOptionalTime } from '../utils/validators';
 import { parse12HourTimeTo24Hour, split24HourTimeTo12Hour } from '../utils/dateFormat';
+import { personalizeMessage } from '../utils/templateMatcher';
 
 export default function EditTemplateScreen({ navigation, route }) {
   const { template, onSave } = route.params;
@@ -86,6 +87,21 @@ export default function EditTemplateScreen({ navigation, route }) {
       setLoading(false);
     }
   };
+
+  // Preview uses the exact days_before number currently in the form — the
+  // real value that will be used at send time — not a literal {days} token.
+  const previewDaysBefore = (() => {
+    const d = parseInt(daysBefore, 10);
+    return isNaN(d) ? 0 : d;
+  })();
+  const previewSampleContact = {
+    name: 'John Doe',
+    phone_number: '0300-1234567',
+    expiry_datetime: new Date(Date.now() + previewDaysBefore * 24 * 60 * 60 * 1000).toISOString(),
+  };
+  const previewBodyText = body.trim()
+    ? personalizeMessage(body, previewSampleContact, previewDaysBefore)
+    : 'Message body will appear here...';
 
   return (
     <KeyboardAvoidingView
@@ -213,7 +229,7 @@ export default function EditTemplateScreen({ navigation, route }) {
             {isActive ? '🟢 Active' : '🔴 Inactive'}
           </Text>
           <Text style={styles.previewTitle}>{title || 'Template Title'}</Text>
-          <Text style={styles.previewBody}>{body || 'Message body will appear here...'}</Text>
+          <Text style={styles.previewBody}>{previewBodyText}</Text>
         </View>
 
         <TouchableOpacity

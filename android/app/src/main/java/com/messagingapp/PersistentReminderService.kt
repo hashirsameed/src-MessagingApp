@@ -1,108 +1,72 @@
 package com.messagingapp
 
 import android.app.Service
-import android.content.Context
 import android.content.Intent
-import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 
 /**
  * PersistentReminderService
  *
- * A real 24/7 foreground service. Its only job is to hold a foreground
- * notification (via ReminderNotificationHelper.buildNotification, the SAME
- * builder used by the lightweight ongoing-trace path) so the OS keeps this
- * process's priority elevated and is much less likely to kill it between
- * scheduled alarms.
+ * Max-reliability mode: a genuine 24/7 foreground service, not just an
+ * ongoing notification. As long as this service is alive, Android treats
+ * the whole app process as foreground-priority — it is far less likely to
+ * be killed under memory pressure than a plain background/headless process,
+ * and its notification cannot be swiped away by the user while the service
+ * runs (only stopping the service removes it).
  *
- * Trade-offs (as agreed):
- *  - The notification becomes NON-DISMISSIBLE while this service runs —
- *    swiping it away does nothing, since Android will not let the user
- *    dismiss a foreground service's notification directly.
- *  - Battery usage goes up versus the previous "notification without a
- *    live service" design, because a foreground process is kept resident
- *    instead of being spun up only when an alarm fires.
- *  - START_STICKY: if the OS still kills this process under memory
- *    pressure, the system will attempt to recreate and restart the
- *    service shortly after, with a null intent.
+ * Trade-off, stated plainly: this keeps the process resident continuously,
+ * which costs more battery than the previous "notification only when
+ * backgrounded" approach, and the notification is now permanently visible
+ * (not just while backgrounded) — that permanence is what buys the
+ * reliability.
  *
- * This service does NOT do the actual sending — AlarmTaskService and the
- * headless JS tasks (RescheduleAlarmsTask / AlarmFiredTask / SafetyNetTask)
- * still own that. This service is purely a keep-alive + visible-status
- * surface.
+ * This service does NOT run the scheduling/dispatch logic itself — that
+ * still happens in AlarmTaskService's headless tasks, triggered by
+ * AlarmManager/WorkManager/BootReceiver exactly as before. This service's
+ * only job is to (a) stay alive so the OS deprioritizes killing the
+ * process, and (b) keep the "next reminder" notification current by
+ * refreshing it on a fixed interval, independent of whether any alarm
+ * happens to fire.
  */
 class PersistentReminderService : Service() {
 
     companion object {
-        private const val NOTIFICATION_ID = ReminderNotificationHelper.NOTIFICATION_ID_PUBLIC
+        private const val REFRESH_INTERVAL_MS = 15 * 60 * 1000L // 15 minutes
+    }
 
-        fun start(context: Context) {
-            try {
-                val intent = Intent(context, PersistentReminderService::class.java)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    context.startForegroundService(intent)
-                } else {
-                    context.startService(intent)
-                }
-                TraceLog.d("PersistentReminderServiceStartRequested", emptyMap())
-            } catch (error: Exception) {
-                TraceLog.e("PersistentReminderServiceStartRequestFailed", error, emptyMap())
-            }
-        }
-
-        fun stop(context: Context) {
-            try {
-                context.stopService(Intent(context, PersistentReminderService::class.java))
-            } catch (error: Exception) {
-                TraceLog.e("PersistentReminderServiceStopFailed", error, emptyMap())
-            }
+    private val refreshHandler = Handler(Looper.getMainLooper())
+    private val refreshRunnable = object : Runnable {
+        override fun run() {
+            ReminderNotificationHelper.postOrUpdate(applicationContext)
+            NextMessageWidgetProvider.refreshAll(applicationContext)
+            refreshHandler.postDelayed(this, REFRESH_INTERVAL_MS)
         }
     }
 
     override fun onCreate() {
         super.onCreate()
         TraceLog.d("PersistentReminderServiceOnCreate", emptyMap())
-        try {
-            val notification = ReminderNotificationHelper.buildNotification(applicationContext)
-            startForeground(NOTIFICATION_ID, notification)
-            TraceLog.d("PersistentReminderServiceForegroundStarted", mapOf("notificationId" to NOTIFICATION_ID))
-        } catch (error: Exception) {
-            // If startForeground() itself fails (e.g. missing permission at
-            // runtime), do not leave the service half-alive — stop cleanly
-            // rather than crash-looping.
-            TraceLog.e("PersistentReminderServiceForegroundStartFailed", error, emptyMap())
-            stopSelf()
-        }
+        ReminderNotificationHelper.ensureChannel(applicationContext)
+        val notification = ReminderNotificationHelper.buildNotification(applicationContext)
+        startForeground(ReminderNotificationHelper.NOTIFICATION_ID, notification)
+        refreshHandler.postDelayed(refreshRunnable, REFRESH_INTERVAL_MS)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        TraceLog.d(
-            "PersistentReminderServiceOnStartCommand",
-            mapOf("startId" to startId, "restarted" to (intent == null)),
-        )
-        // Keep the notification content fresh (next-alarm time changes as
-        // alarms fire/reschedule) any time the service is (re)started.
-        try {
-            val notification = ReminderNotificationHelper.buildNotification(applicationContext)
-            startForeground(NOTIFICATION_ID, notification)
-        } catch (error: Exception) {
-            TraceLog.e("PersistentReminderServiceRefreshFailed", error, emptyMap())
-        }
-        // START_STICKY: ask the OS to recreate this service (with a null
-        // intent) if it gets killed, instead of leaving it dead.
+        TraceLog.d("PersistentReminderServiceOnStartCommand", mapOf("startId" to startId))
+        // START_STICKY: if the OS kills this service to reclaim memory, it
+        // recreates it (with a null intent) as soon as resources allow —
+        // this is the second half of "reliably alive", alongside boot-start.
         return START_STICKY
     }
 
-    override fun onBind(intent: Intent?): IBinder? = null
-
     override fun onDestroy() {
         TraceLog.d("PersistentReminderServiceOnDestroy", emptyMap())
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            stopForeground(STOP_FOREGROUND_REMOVE)
-        } else {
-            @Suppress("DEPRECATION")
-            stopForeground(true)
-        }
+        refreshHandler.removeCallbacks(refreshRunnable)
         super.onDestroy()
     }
+
+    override fun onBind(intent: Intent?): IBinder? = null
 }

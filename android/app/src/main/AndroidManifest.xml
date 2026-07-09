@@ -9,10 +9,6 @@
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SHORT_SERVICE" />
-    <!-- Required on Android 14+ (API 34) for a foreground service whose
-         purpose doesn't fit a stock type (dataSync/mediaPlayback/location/etc).
-         Google Play requires a declared reason for "specialUse" at submission
-         time (Play Console > App content > Foreground service permissions). -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
     <application
@@ -71,7 +67,7 @@
         android:foregroundServiceType="specialUse">
         <property
             android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-            android:value="Keeps the SMS/WhatsApp reminder-engine scheduler alive so time-sensitive expiry reminders still fire" />
+            android:value="Keeps scheduled ISP-expiry SMS/WhatsApp reminders on time by staying resident" />
       </service>
 
     </application>

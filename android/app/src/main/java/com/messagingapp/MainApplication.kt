@@ -1,6 +1,8 @@
 package com.messagingapp
 
 import android.app.Application
+import android.content.Intent
+import androidx.core.content.ContextCompat
 import com.facebook.react.PackageList
 import com.facebook.react.ReactApplication
 import com.facebook.react.ReactHost
@@ -33,19 +35,6 @@ class MainApplication : Application(), ReactApplication {
   }
 
   /**
-   * Starts the 24/7 foreground reminder service on every normal process
-   * start (app opened by the user, process restarted by the OS, etc.) —
-   * not just after boot. BootReceiver already starts it after a reboot;
-   * this covers every other case where the process comes up.
-   * PersistentReminderService.start() is itself idempotent-safe: calling
-   * startForegroundService() while the service is already running just
-   * redelivers onStartCommand(), it doesn't create a second instance.
-   */
-  private fun startPersistentReminderService() {
-    PersistentReminderService.start(applicationContext)
-  }
-
-  /**
    * 15 minutes is the minimum interval Android allows for PeriodicWorkRequest.
    * KEEP policy means re-enqueuing on every process start (app open, boot,
    * headless task start) is a no-op if the job is already scheduled — this
@@ -58,5 +47,20 @@ class MainApplication : Application(), ReactApplication {
       ExistingPeriodicWorkPolicy.KEEP,
       request,
     )
+  }
+
+  /**
+   * Every process start (app opened normally, or process recreated after
+   * being killed) also (re)starts the 24/7 foreground service — BootReceiver
+   * covers the reboot case, this covers every other process start. Safe to
+   * call repeatedly: starting an already-running service just redelivers
+   * onStartCommand, it does not create a duplicate instance.
+   */
+  private fun startPersistentReminderService() {
+    try {
+      ContextCompat.startForegroundService(this, Intent(this, PersistentReminderService::class.java))
+    } catch (error: Exception) {
+      TraceLog.e("MainApplicationStartPersistentServiceException", error, emptyMap())
+    }
   }
 }

@@ -43,7 +43,7 @@ export const formatTemplateSendTime = (time24) => {
 
 export const split24HourTimeTo12Hour = (time24) => {
   const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(time24 ?? '');
-  if (!match) return { time: '', meridiem: 'AM' };
+  if (!match) return { time: '', meridiem: null };
 
   let hours = parseInt(match[1], 10);
   const minutes = match[2];

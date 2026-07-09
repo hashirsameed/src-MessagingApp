@@ -9,13 +9,14 @@ import { rescheduleAlarmsForTemplate } from '../utils/alarmScheduler';
 import { handleError, showError, showSuccess, ErrorMessages } from '../utils/errorHandler';
 import { validateTemplateTitle, validateTemplateBody, validateOptionalTime } from '../utils/validators';
 import { parse12HourTimeTo24Hour } from '../utils/dateFormat';
+import { personalizeMessage } from '../utils/templateMatcher';
 
 export default function CreateTemplateScreen({ navigation }) {
   const [title, setTitle]         = useState('');
   const [body, setBody]           = useState('');
   const [daysBefore, setDaysBefore] = useState('1');
   const [sendTime, setSendTime]   = useState('');
-  const [sendMeridiem, setSendMeridiem] = useState('AM');
+  const [sendMeridiem, setSendMeridiem] = useState(null);
   const [isActive, setIsActive]   = useState(true);
   const [errors, setErrors]       = useState({});
 
@@ -69,6 +70,23 @@ export default function CreateTemplateScreen({ navigation }) {
       showError('Error', ErrorMessages.DB_WRITE);
     }
   };
+
+  // Preview uses the exact days_before number the user just typed — this is
+  // the actual value that will go out in the real message, not a sample.
+  // {name}/{expiry}/{phone} use representative sample values since no real
+  // contact is picked yet at template-creation time.
+  const previewDaysBefore = (() => {
+    const d = parseInt(daysBefore, 10);
+    return isNaN(d) ? 0 : d;
+  })();
+  const previewSampleContact = {
+    name: 'John Doe',
+    phone_number: '0300-1234567',
+    expiry_datetime: new Date(Date.now() + previewDaysBefore * 24 * 60 * 60 * 1000).toISOString(),
+  };
+  const previewBodyText = body.trim()
+    ? personalizeMessage(body, previewSampleContact, previewDaysBefore)
+    : 'Message body will appear here...';
 
   return (
     <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
@@ -197,7 +215,7 @@ export default function CreateTemplateScreen({ navigation }) {
             {isActive ? '🟢 Active' : '🔴 Inactive'}
           </Text>
           <Text style={styles.previewTitle}>{title || 'Template Title'}</Text>
-          <Text style={styles.previewBody}>{body || 'Message body will appear here...'}</Text>
+          <Text style={styles.previewBody}>{previewBodyText}</Text>
         </View>
 
         <TouchableOpacity style={styles.saveBtn} onPress={handleSave}>
