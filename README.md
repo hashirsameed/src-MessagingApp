@@ -1,4 +1,55 @@
-This is a new [**React Native**](https://reactnative.dev) project, bootstrapped using [`@react-native-community/cli`](https://github.com/react-native-community/cli).
+# MessagingApp
+
+A React Native (bare) app for tracking contact expiry dates and automatically sending reminder messages — via SMS, WhatsApp, or a custom URL-scheme platform — on a schedule you define with reusable templates.
+
+## What it does
+
+1. Add a contact with a name, phone number, and an expiry date/time.
+2. Create message templates like "7 days before expiry", "on expiry day", or "3 days after expiry", with a body that can reference `{name}`, `{phone}`, `{days}`, and `{expiry}`.
+3. The app matches active templates against each contact's expiry and queues a message when a template becomes due.
+4. Queued messages are sent automatically (SMS/WhatsApp) or opened for manual send via the selected platform's URL scheme.
+5. On Android, reminders are backed by native exact alarms, so they can fire even if the app is closed or the device is idle — plus a boot receiver, a WorkManager safety-net sweep, and a foreground 15-minute poll as a fallback.
+
+## Tech stack
+
+- React Native 0.86, React 19.2
+- Navigation: `@react-navigation` (native-stack + bottom-tabs)
+- Local storage: `react-native-quick-sqlite`
+- Secure credential storage: `react-native-keychain` (used for WhatsApp Cloud API credentials)
+- Android native modules (Kotlin): `AlarmManager`, `SmsManager`, Headless JS, WorkManager, AppWidgetProvider
+- Tests: Jest + `react-test-renderer`
+
+## Project layout
+
+```
+App.tsx                 Navigation root, foreground scheduler, AppState listener
+index.js                RN entry point + headless-task registration
+src/screens/            UI: contacts, templates, queue, settings, platforms, WhatsApp config
+src/database/           SQLite schema + CRUD (contacts, templates, platforms, settings, queue, alarms)
+src/utils/              Scheduling engine, queue processor, SMS/WhatsApp dispatch, validators
+android/.../messagingapp/  Native Kotlin: alarm scheduling, SMS bridge, boot recovery, home-screen widget
+docs/PROJECT_REPORT.md  Full architecture write-up, known issues, and audit notes
+```
+
+## Android permissions
+
+`INTERNET`, `SEND_SMS`, `READ_PHONE_STATE`, `SCHEDULE_EXACT_ALARM`, `RECEIVE_BOOT_COMPLETED`, `WAKE_LOCK`, `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`, `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_SHORT_SERVICE`.
+
+## Testing
+
+```sh
+npm test
+```
+
+Runs the Jest suite (database, scheduler, queue processor, template matcher, and component render tests). All suites currently pass; see `docs/PROJECT_REPORT.md` for known application-level issues being tracked separately from test health.
+
+## Known issues
+
+See **Section 19 (Known Issues and Risks)** of `docs/PROJECT_REPORT.md` for the current, prioritized list — including WhatsApp auto-send payload handling, queue-claim atomicity, multipart SMS result aggregation, and timezone edge cases around alarm scheduling.
+
+---
+
+Bootstrapped using [`@react-native-community/cli`](https://github.com/react-native-community/cli).
 
 # Getting Started
 
