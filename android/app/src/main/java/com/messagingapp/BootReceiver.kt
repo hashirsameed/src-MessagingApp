@@ -34,6 +34,18 @@ class BootReceiver : BroadcastReceiver() {
         } catch (error: Exception) {
             TraceLog.e("BootReceiverUnexpectedFailure", error, mapOf("action" to serviceIntent.action))
         }
+
+        // Start the 24/7 persistent service immediately after boot too, so the
+        // process gets elevated OS priority right away instead of waiting for
+        // the first alarm to fire.
+        try {
+            TraceLog.d("BootReceiverPersistentServiceStartBefore", emptyMap())
+            PersistentReminderService.start(context)
+            TraceLog.d("BootReceiverPersistentServiceStartAfter", emptyMap())
+        } catch (error: Exception) {
+            TraceLog.e("BootReceiverPersistentServiceStartFailed", error, emptyMap())
+        }
+
         TraceLog.d("BootReceiverOnReceiveEnd", mapOf("action" to intent.action))
     }
 }

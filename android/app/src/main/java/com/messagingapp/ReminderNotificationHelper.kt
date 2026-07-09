@@ -52,47 +52,64 @@ object ReminderNotificationHelper {
         }
     }
 
+    /** Exposed so PersistentReminderService can reuse the exact same channel id
+     *  when calling startForeground() — one channel, one notification id, no
+     *  duplicate notifications between the ongoing-trace path and the
+     *  persistent-service path. */
+    const val NOTIFICATION_ID_PUBLIC = NOTIFICATION_ID
+
+    /**
+     * Builds (but does not post) the ongoing background-trace notification.
+     * Extracted so both postOrUpdate() (fire-and-forget update) and
+     * PersistentReminderService (which must pass a Notification into
+     * startForeground()) share one source of truth for title/body/intent —
+     * no drift between the two notification surfaces.
+     */
+    fun buildNotification(context: Context): Notification {
+        ensureChannel(context)
+        val next = NextAlarmRepository.queryNextAlarm(context)
+
+        val (title, body) = if (next != null) {
+            "Reminder engine active" to
+                "Next: ${next.contactName} — ${next.templateTitle} at ${NextAlarmRepository.formatPakistanTime(next.triggerAtIso)}"
+        } else {
+            "Reminder engine active" to "No upcoming reminders scheduled"
+        }
+
+        val launchIntent = context.packageManager.getLaunchIntentForPackage(context.packageName)
+        val contentIntent = launchIntent?.let {
+            val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            } else {
+                PendingIntent.FLAG_UPDATE_CURRENT
+            }
+            PendingIntent.getActivity(context, 0, it, flags)
+        }
+
+        val builder = Notification.Builder(context, CHANNEL_ID)
+            .setContentTitle(title)
+            .setContentText(body)
+            .setSmallIcon(android.R.drawable.stat_notify_sync)
+            .setPriority(Notification.PRIORITY_LOW)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+
+        if (contentIntent != null) {
+            builder.setContentIntent(contentIntent)
+        }
+
+        return builder.build()
+    }
+
     /** Builds and posts (or updates) the ongoing background-trace notification. */
     fun postOrUpdate(context: Context) {
         try {
-            ensureChannel(context)
             val manager = context.getSystemService(NotificationManager::class.java) ?: return
-
-            val next = NextAlarmRepository.queryNextAlarm(context)
-
-            val (title, body) = if (next != null) {
-                "Reminder engine active" to
-                    "Next: ${next.contactName} — ${next.templateTitle} at ${NextAlarmRepository.formatPakistanTime(next.triggerAtIso)}"
-            } else {
-                "Reminder engine active" to "No upcoming reminders scheduled"
-            }
-
-            val launchIntent = context.packageManager.getLaunchIntentForPackage(context.packageName)
-            val contentIntent = launchIntent?.let {
-                val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                } else {
-                    PendingIntent.FLAG_UPDATE_CURRENT
-                }
-                PendingIntent.getActivity(context, 0, it, flags)
-            }
-
-            val builder = Notification.Builder(context, CHANNEL_ID)
-                .setContentTitle(title)
-                .setContentText(body)
-                .setSmallIcon(android.R.drawable.stat_notify_sync)
-                .setPriority(Notification.PRIORITY_LOW)
-                .setOngoing(true)
-                .setOnlyAlertOnce(true)
-
-            if (contentIntent != null) {
-                builder.setContentIntent(contentIntent)
-            }
-
-            manager.notify(NOTIFICATION_ID, builder.build())
+            val notification = buildNotification(context)
+            manager.notify(NOTIFICATION_ID, notification)
             TraceLog.d(
                 "BackgroundTraceNotificationPosted",
-                mapOf("hasNextAlarm" to (next != null)),
+                mapOf("hasNextAlarm" to true),
             )
         } catch (error: Exception) {
             TraceLog.e("BackgroundTraceNotificationException", error, emptyMap())

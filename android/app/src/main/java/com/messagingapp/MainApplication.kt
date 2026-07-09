@@ -29,6 +29,20 @@ class MainApplication : Application(), ReactApplication {
     super.onCreate()
     loadReactNative(this)
     scheduleSafetyNetWorker()
+    startPersistentReminderService()
+  }
+
+  /**
+   * Starts the 24/7 foreground reminder service on every normal process
+   * start (app opened by the user, process restarted by the OS, etc.) —
+   * not just after boot. BootReceiver already starts it after a reboot;
+   * this covers every other case where the process comes up.
+   * PersistentReminderService.start() is itself idempotent-safe: calling
+   * startForegroundService() while the service is already running just
+   * redelivers onStartCommand(), it doesn't create a second instance.
+   */
+  private fun startPersistentReminderService() {
+    PersistentReminderService.start(applicationContext)
   }
 
   /**

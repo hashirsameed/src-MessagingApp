@@ -1,6 +1,6 @@
 # MessagingApp Complete Project Report
 
-Last reviewed: 2026-07-02
+Last reviewed: 2026-07-08
 
 ## 1. Project Ka Purpose
 
@@ -32,9 +32,12 @@ Core idea:
   - Kotlin
   - `AlarmManager`
   - `SmsManager`
+  - `WorkManager`
+  - App widget / notification helpers
   - Headless JS
 - Tests:
-  - Jest configured, but currently failing because preset `@react-native/jest-preset` is missing.
+  - Jest configured with React Native preset.
+  - Current suite covers scheduler, queue processor, SMS permission handling, template matching, alarm scheduling, and queue DB behavior.
 
 ## 3. Folder Structure
 
@@ -51,6 +54,7 @@ Important files:
   - Headless JS task registration:
     - `AlarmFiredTask`
     - `RescheduleAlarmsTask`
+    - `SafetyNetTask`
 
 - `src/screens`
   - UI screens for contacts, templates, queue, settings, platforms, WhatsApp config/templates.
@@ -69,6 +73,8 @@ Important files:
 
 - `android/app/src/main/java/com/messagingapp`
   - Native Kotlin modules for SMS and alarms.
+  - WorkManager safety-net worker.
+  - next-message widget and reminder notification helpers.
 
 ## 4. App Navigation Wiring
 
@@ -178,6 +184,9 @@ Current keys:
 
 - `default_platform`
 - `sms_per_hour_limit`
+- `engine_last_run`
+  - JSON payload written by background/headless engine runs.
+  - Tracks trigger source, last run time, trace id, and processed count.
 
 ### `message_queue`
 
@@ -217,10 +226,17 @@ Columns:
 Statuses:
 
 - `scheduled`
+- `firing`
 - `fired`
 - `cancelled`
 
 This table is the app-side audit/source-of-truth for native alarms.
+
+Important invariants:
+
+- `id = contact_id + '_' + template_id`
+- `UNIQUE(contact_id, template_id)` keeps one active row per contact/template pair.
+- Native `AlarmManager` is treated as the executor; `scheduled_alarms` is the trusted state.
 
 ## 6. Contact Flow
 
@@ -449,13 +465,44 @@ Pipeline:
    - It acquires Headless JS wake lock.
 7. `AlarmTaskService` starts `AlarmFiredTask`.
 8. JS headless task:
-   - validates scheduled alarm row
+   - atomically claims scheduled alarm row (`scheduled` -> `firing`)
    - validates template still exists and active
    - validates contact still exists
    - checks trigger drift
    - queues message with default platform
    - marks alarm fired if queued or deduped
+   - releases claim back to `scheduled` only for transient queue DB errors
    - calls `processQueue()`
+
+### Layer C: Android WorkManager Safety Net
+
+Files:
+
+- `android/app/src/main/java/com/messagingapp/ExpirySafetyNetWorker.kt`
+- `android/app/src/main/java/com/messagingapp/MainApplication.kt`
+- `android/app/src/main/java/com/messagingapp/AlarmTaskService.kt`
+- `src/utils/alarmHeadlessTask.js`
+
+Purpose:
+
+Some Android OEM battery managers can suppress exact alarms even when the app uses correct `AlarmManager` APIs. The safety net is a periodic WorkManager job that re-runs the same expiry check path every ~15 minutes, the minimum periodic interval Android allows.
+
+Pipeline:
+
+1. `MainApplication.onCreate()` calls `scheduleSafetyNetWorker()`.
+2. WorkManager enqueues unique periodic work:
+   - name: `expiry_safety_net_worker`
+   - policy: `ExistingPeriodicWorkPolicy.KEEP`
+   - interval: 15 minutes
+3. `ExpirySafetyNetWorker.doWork()` starts `AlarmTaskService`.
+4. Service action `SAFETY_NET_CHECK` maps to Headless JS task `SafetyNetTask`.
+5. `SafetyNetTask` calls `runExpiryCheck(traceId)`.
+6. It records engine status via `recordEngineRun('safetyNet', ...)`.
+
+Safety rule:
+
+- Exact alarms, WorkManager safety net, and boot reschedule may all touch the same logical reminder.
+- `claimScheduledAlarmForFiring()` is the shared compare-and-swap gate; only the caller that changes `scheduled` to `firing` proceeds.
 
 ## 10. Alarm Time Calculation
 
@@ -502,6 +549,7 @@ Pipeline:
 5. App reads all `scheduled_alarms` rows with status `scheduled`.
 6. Future alarms are scheduled again in native `AlarmManager`.
 7. Past/invalid alarms are marked cancelled.
+8. Engine status is recorded as `bootReschedule`.
 
 ## 12. Queue Pipeline
 
@@ -519,12 +567,15 @@ Messages enter the queue from:
 
 - if same contact/template is `PENDING` or `PROCESSING`, skip as `ALREADY_PENDING`
 - if same contact/template was `SENT` in last 30 days, skip as `ALREADY_SENT_RECENTLY`
+- if same contact/template `FAILED` in last 24 hours, skip as `RECENTLY_FAILED`
+
+It also records prior send counts in debug traces so duplicate investigations can distinguish legitimate repeated expiry cycles from accidental resends.
 
 ### Queue Processing
 
 `processQueue(onProgress)` pipeline:
 
-1. `claimPendingQueue()` marks pending rows as `PROCESSING`.
+1. `claimPendingQueue(traceId)` marks currently pending rows as `PROCESSING`.
 2. Load:
    - all contacts
    - all templates
@@ -542,6 +593,14 @@ Messages enter the queue from:
    - dispatch by platform
    - mark sent/opened/failed
    - wait before next send
+
+Claiming behavior:
+
+- each processing run gets a trace id
+- only rows claimed by that run are returned
+- old/stale `PROCESSING` rows older than 2 minutes are moved to `FAILED`
+- stale rows use error reason `STUCK_PROCESSING_TIMEOUT`
+- this prevents reopening/headless overlap from resending unrelated old `PROCESSING` rows
 
 ### Rate Limiting
 
@@ -569,6 +628,30 @@ If SMS limit is reached:
 
 - `revertToPending(id)`
   - status = `PENDING`
+
+### Queue Screen
+
+File: `src/screens/QueueScreen.js`
+
+The queue UI is tabbed by status:
+
+- Pending
+- Sent
+- Failed
+
+Current actions:
+
+- Retry failed SMS and failed WhatsApp rows.
+- Delete pending or failed rows.
+- Delete sent Android SMS rows.
+- Pull to refresh.
+
+Retry behavior:
+
+1. Failed row is reverted to `PENDING`.
+2. UI refreshes immediately.
+3. `processQueue()` runs.
+4. UI refreshes again after processing.
 
 ## 13. Delivery Channels
 
@@ -667,6 +750,7 @@ Features:
 - choose default sending platform
 - configure WhatsApp API
 - set SMS per-hour limit
+- show Android exact alarm / battery optimization repair cards when needed
 - dev-only manual scheduler run
 
 Default platform behavior:
@@ -676,6 +760,12 @@ Default platform behavior:
 WhatsApp config state:
 
 - `hasWhatsAppCredentials()` checks access token and phone number ID.
+
+Android background reliability:
+
+- Settings re-checks exact alarm permission whenever focused.
+- Settings re-checks battery optimization exemption whenever focused.
+- If either is missing, user sees a repair card that opens the relevant native settings flow.
 
 ## 16. WhatsApp Template Management
 
@@ -749,6 +839,7 @@ Components:
 - `AlarmReceiver`
 - `BootReceiver`
 - `AlarmTaskService`
+- `NextMessageWidgetProvider`
 
 ### MainActivity
 
@@ -776,6 +867,13 @@ This exposes JS modules:
 
 - `NativeModules.SmsModule`
 - `NativeModules.AlarmModule`
+
+It also schedules:
+
+- WorkManager unique periodic work `expiry_safety_net_worker`
+- worker class: `ExpirySafetyNetWorker`
+- cadence: 15 minutes
+- policy: `KEEP`
 
 ### AlarmModule
 
@@ -809,7 +907,31 @@ When phone boots:
 Routes native service starts to JS tasks:
 
 - action `RESCHEDULE_ALL_ALARMS` -> `RescheduleAlarmsTask`
+- action `SAFETY_NET_CHECK` -> `SafetyNetTask`
 - normal alarm extras -> `AlarmFiredTask`
+
+It starts as a foreground service with a low-priority notification so Android allows background/headless reminder delivery. On destroy it refreshes the next-message widget and posts/updates the reminder notification.
+
+### WorkManager Safety Net
+
+File: `ExpirySafetyNetWorker.kt`
+
+Runs periodically and starts `AlarmTaskService` with action `SAFETY_NET_CHECK`. It retries through WorkManager backoff if the service cannot start.
+
+### Next Reminder Surfaces
+
+Files:
+
+- `NextAlarmRepository.kt`
+- `NextMessageWidgetProvider.kt`
+- `ReminderNotificationHelper.kt`
+
+Purpose:
+
+- Read the next scheduled alarm directly from SQLite.
+- Show the next reminder on a home-screen widget.
+- Keep the persistent reminder notification in sync.
+- Use the same query source so widget and notification do not disagree.
 
 ## 18. Important Functions Inventory
 
@@ -820,7 +942,9 @@ Routes native service starts to JS tasks:
 - `insertContact`, `updateContact`, `deleteContact`, `getAllContacts`, `getContactById`
 - `insertTemplate`, `updateTemplate`, `deleteTemplate`, `toggleTemplateActive`, `getActiveTemplates`
 - `addToQueueDetailed`, `claimPendingQueue`, `markAsSent`, `markAsFailed`, `revertToPending`
-- `upsertScheduledAlarm`, `markScheduledAlarmFired`, `markScheduledAlarmCancelled`
+- `upsertScheduledAlarm`, `claimScheduledAlarmForFiring`, `releaseScheduledAlarmClaim`
+- `markScheduledAlarmFired`, `markScheduledAlarmCancelled`, `getNextUpcomingAlarm`
+- `recordEngineRun`, `getLastEngineRun`
 - `getDefaultPlatform`, `setDefaultPlatform`, `getSmsPerHourLimit`, `setSmsPerHourLimit`
 
 ### Scheduler
@@ -837,6 +961,8 @@ Routes native service starts to JS tasks:
   - cancel old template alarms and create new ones
 - `rearmAllScheduledAlarmsAfterBoot`
   - boot recovery
+- `SafetyNetTask`
+  - WorkManager-triggered fallback expiry scan
 
 ### Queue
 
@@ -866,25 +992,20 @@ These are important from audit.
 
 ### Critical/High
 
-1. WhatsApp automatic sending currently ignores personalized message.
-   - `sendWhatsAppMessage(toPhone, message)` sends hardcoded `hello_world` template instead of `message`.
+1. WhatsApp automatic sending is still in development mode.
+   - `DEV_MODE = true` sends Meta's approved `hello_world` template instead of the personalized message.
+   - Production needs approved Meta templates or a deliberate switch to freeform text with Meta's 24-hour customer-service-window limitation understood.
 
-2. Queue claiming can duplicate sends during concurrent processing.
-   - `claimPendingQueue()` marks all pending as processing and then returns all processing rows.
-
-3. Multipart SMS can be misreported as sent.
+2. Multipart SMS can be misreported as sent.
    - same `PendingIntent` is used for every part; first result can resolve promise.
 
-4. Alarm time math mixes UTC storage with local `setHours`.
+3. Alarm time math mixes UTC storage with local `setHours`.
    - reminders can shift around timezone/DST edges.
 
-5. Reboot recovery cancels overdue scheduled alarms.
+4. Reboot recovery cancels overdue scheduled alarms.
    - if device was off during trigger time, reminder can be lost.
 
-6. Background/headless queue processing can request SMS permission.
-   - permission prompts are not reliable in background.
-
-7. Logs expose PII.
+5. Logs expose PII.
    - contact names, phone numbers, and template titles are printed.
 
 ### Medium
@@ -894,11 +1015,25 @@ These are important from audit.
 3. Phone formatting is Pakistan-specific and inconsistent across manual vs queue paths.
 4. Manual PlatformSelect supports fewer placeholders than queue path.
 5. Email/Gmail seeded URL schemes use `{phone}` instead of `{email}`.
-6. Jest config is currently broken.
+6. Background reliability still depends on OEM battery/autostart policy even with exact alarms and WorkManager safety net.
+
+### Recently Mitigated
+
+1. Queue claiming is now run-scoped.
+   - `claimPendingQueue(traceId)` returns only rows claimed by the current run.
+   - stale `PROCESSING` rows are moved to `FAILED` instead of being resent automatically.
+
+2. Background SMS permission prompts are avoided.
+   - background/headless runs use `PermissionsAndroid.check()`.
+   - permission dialogs are only requested when `AppState.currentState === 'active'`.
+
+3. Alarm firing is now compare-and-swap guarded.
+   - `claimScheduledAlarmForFiring()` moves `scheduled` to `firing`.
+   - exact alarm, safety net, and boot recovery cannot all queue the same alarm row.
 
 ## 20. Verification Result
 
-Commands run during audit:
+Previously recorded audit commands plus the current doc-update test run:
 
 - `npm.cmd run lint`
   - passed with warnings
@@ -908,8 +1043,9 @@ Commands run during audit:
   - passed
 
 - `npm.cmd test -- --runInBand`
-  - failed
-  - reason: `Preset @react-native/jest-preset not found`
+  - passed
+  - 10 test suites, 55 tests
+  - note: `App.test.tsx` still logs a React Native `act(...)` warning after test completion
 
 ## 21. End-To-End Flow Summary
 
@@ -921,11 +1057,12 @@ Commands run during audit:
 4. Alarm row is saved in `scheduled_alarms`.
 5. Alarm fires.
 6. Native `AlarmReceiver` starts Headless JS.
-7. `AlarmFiredTask` validates contact/template/alarm row.
-8. Queue row is inserted.
-9. `processQueue()` sends message.
-10. Queue row becomes `SENT` or `FAILED`.
-11. Alarm row becomes `fired`.
+7. `AlarmFiredTask` atomically claims the alarm row.
+8. It validates contact/template/alarm drift.
+9. Queue row is inserted or deduped.
+10. `processQueue()` sends message.
+11. Queue row becomes `SENT` or `FAILED`.
+12. Alarm row becomes `fired`.
 
 ### Foreground Fallback Flow
 
@@ -935,6 +1072,14 @@ Commands run during audit:
 4. It checks optional `send_time`.
 5. It queues matching messages.
 6. It calls `processQueue()`.
+
+### Safety-Net Flow
+
+1. WorkManager runs `ExpirySafetyNetWorker` about every 15 minutes.
+2. Worker starts `AlarmTaskService` with `SAFETY_NET_CHECK`.
+3. `SafetyNetTask` runs `runExpiryCheck(traceId)`.
+4. Due-but-missed messages are queued through the same foreground scheduler path.
+5. `recordEngineRun('safetyNet', ...)` updates `settings.engine_last_run`.
 
 ### Manual Send Flow
 
@@ -960,16 +1105,14 @@ Commands run during audit:
 Priority order:
 
 1. Fix WhatsApp automatic send to use real personalized content or approved Meta templates properly.
-2. Make queue claiming atomic and run-scoped.
-3. Fix multipart SMS delivery result aggregation.
-4. Normalize timezone handling for alarms.
-5. Add boot overdue recovery instead of cancelling due reminders.
-6. Remove background permission prompts.
-7. Sanitize production logs.
-8. Fix Jest preset/dependency and add tests for:
+2. Fix multipart SMS delivery result aggregation.
+3. Normalize timezone handling for alarms.
+4. Add boot overdue recovery instead of cancelling due reminders.
+5. Sanitize production logs.
+6. Add/expand tests for:
    - date/time scheduling
-   - queue duplicate prevention
+   - alarm claim/release behavior
+   - WorkManager safety-net behavior
    - template matching
    - phone formatting
    - WhatsApp payload behavior
-
