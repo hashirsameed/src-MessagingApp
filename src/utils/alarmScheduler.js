@@ -220,6 +220,16 @@ export const scheduleAlarm = async (contactId, templateId, timestampMs) => {
     if (result === 'SCHEDULED') {
       const triggerAtISO = new Date(timestampMs).toISOString().replace(/\.\d{3}Z$/, 'Z');
       upsertScheduledAlarm(contactId, templateId, requestCode, triggerAtISO);
+      // Refresh only now — after the new row is actually written — so the
+      // notification/widget "next alarm" query sees it. Refreshing earlier
+      // (previously done inside the native module, right after
+      // promise.resolve) raced ahead of this write and kept showing the
+      // previous next-alarm.
+      if (AlarmModule.refreshReminderSurfaces) {
+        AlarmModule.refreshReminderSurfaces().catch((error) => {
+          handleError(error, 'scheduleAlarm.refreshReminderSurfaces');
+        });
+      }
     }
 
     return result;
@@ -239,6 +249,13 @@ export const cancelAlarm = async (contactId, templateId) => {
     const requestCode = getRequestCode(contactId, templateId);
     const nativeResult = await AlarmModule.cancelExactAlarm(requestCode, contactId, templateId);
     markScheduledAlarmCancelled(contactId, templateId);
+    // Same ordering fix as scheduleAlarm: only refresh the notification/
+    // widget after the cancellation has actually landed in SQLite.
+    if (AlarmModule.refreshReminderSurfaces) {
+      AlarmModule.refreshReminderSurfaces().catch((error) => {
+        handleError(error, 'cancelAlarm.refreshReminderSurfaces');
+      });
+    }
     return nativeResult;
   } catch (error) {
     handleError(error, 'cancelAlarm');
@@ -267,6 +284,11 @@ export const cancelAlarmsForContact = async (contactId) => {
       handleError(error, 'cancelAlarmsForContact.native');
     }
   }
+  if (cancelledRows.length > 0 && AlarmModule.refreshReminderSurfaces) {
+    AlarmModule.refreshReminderSurfaces().catch((error) => {
+      handleError(error, 'cancelAlarmsForContact.refreshReminderSurfaces');
+    });
+  }
   return cancelledRows.length;
 };
 
@@ -279,6 +301,11 @@ export const cancelAlarmsForTemplate = async (templateId) => {
     } catch (error) {
       handleError(error, 'cancelAlarmsForTemplate.native');
     }
+  }
+  if (cancelledRows.length > 0 && AlarmModule.refreshReminderSurfaces) {
+    AlarmModule.refreshReminderSurfaces().catch((error) => {
+      handleError(error, 'cancelAlarmsForTemplate.refreshReminderSurfaces');
+    });
   }
   return cancelledRows.length;
 };

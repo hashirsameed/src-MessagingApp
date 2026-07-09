@@ -103,8 +103,6 @@ class AlarmModule(reactContext: ReactApplicationContext) :
                 mapOf("contactId" to contactId, "templateId" to templateId, "requestCode" to code),
             )
             promise.resolve("SCHEDULED")
-            NextMessageWidgetProvider.refreshAll(context)
-            ReminderNotificationHelper.postOrUpdate(context)
             TraceLog.d(
                 "AlarmModuleScheduleExactAlarmResolved",
                 mapOf("contactId" to contactId, "templateId" to templateId, "requestCode" to code, "result" to "SCHEDULED"),
@@ -141,8 +139,6 @@ class AlarmModule(reactContext: ReactApplicationContext) :
             alarmManager.cancel(pendingIntent)
             pendingIntent.cancel()
             promise.resolve(true)
-            NextMessageWidgetProvider.refreshAll(context)
-            ReminderNotificationHelper.postOrUpdate(context)
             TraceLog.d(
                 "AlarmModuleCancelExactAlarmResolved",
                 mapOf("contactId" to contactId, "templateId" to templateId, "requestCode" to code, "result" to true),
@@ -242,6 +238,33 @@ class AlarmModule(reactContext: ReactApplicationContext) :
             promise.resolve(true)
         } catch (error: Exception) {
             TraceLog.e("AlarmModuleHideBackgroundTraceNotificationException", error)
+            promise.resolve(false)
+        }
+    }
+
+    /**
+     * Called from JS ONLY after it has finished writing the corresponding
+     * change to SQLite (upsertScheduledAlarm / markScheduledAlarmCancelled).
+     *
+     * scheduleExactAlarm() and cancelExactAlarm() used to call
+     * NextMessageWidgetProvider.refreshAll() / ReminderNotificationHelper
+     * .postOrUpdate() themselves, right after promise.resolve(). That ran
+     * on the native thread immediately, before the JS thread even got to
+     * execute its own .then() handler that writes the new/cancelled row to
+     * SQLite — so the notification/widget queried the DB *before* the
+     * write landed and kept showing stale "next alarm" data. Moving the
+     * refresh here, called explicitly by JS after its write, closes that
+     * race.
+     */
+    @ReactMethod
+    fun refreshReminderSurfaces(promise: Promise) {
+        try {
+            val context = reactApplicationContext
+            NextMessageWidgetProvider.refreshAll(context)
+            ReminderNotificationHelper.postOrUpdate(context)
+            promise.resolve(true)
+        } catch (error: Exception) {
+            TraceLog.e("AlarmModuleRefreshReminderSurfacesException", error)
             promise.resolve(false)
         }
     }
