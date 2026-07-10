@@ -73,3 +73,16 @@ export const parse12HourTimeTo24Hour = (time, meridiem) => {
 
   return `${String(hours).padStart(2, '0')}:${minutes}`;
 };
+
+// n > 0 = days remaining before expiry, n < 0 = days passed after expiry, 0 = expiry day.
+export const formatDaysLabel = (daysBefore) => {
+  const n = daysBefore ?? 0;
+
+  if (n === 0) return 'Today';
+  if (n === 1) return 'Tomorrow';
+  if (n === -1) return 'Yesterday';
+
+  return n > 0
+    ? `${n} days before expiry`
+    : `${Math.abs(n)} days after expiry`;
+};

@@ -8,7 +8,7 @@ import { getAllTemplates, deleteTemplate, toggleTemplateActive } from '../databa
 import { getAllContacts } from '../database/contactDB';
 import { getAllPlatforms, seedDefaultPlatforms } from '../database/platformDB';
 import { cancelAlarmsForTemplate, rescheduleAlarmsForTemplate } from '../utils/alarmScheduler';
-import { formatTemplateSendTime } from '../utils/dateFormat';
+import { formatTemplateSendTime, formatDaysLabel } from '../utils/dateFormat';
 import { handleError, showError, showConfirm, ErrorMessages } from '../utils/errorHandler';
 import { InlineLoader } from '../components/LoadingSpinner';
 import WhatsAppTemplatesScreen from './WhatsAppTemplatesScreen';
@@ -103,7 +103,7 @@ export default function TemplatesScreen({ navigation }) {
           <View style={styles.cardContent}>
             <Text style={styles.title}>{item.title}</Text>
             <Text style={styles.daysLabel}>Time: {timeLabel}</Text>
-            <Text style={styles.daysLabel}>📅 {daysLabel}</Text>
+            <Text style={styles.daysLabel}>📅 {formatDaysLabel(item.days_before)}</Text>
             <Text style={styles.body} numberOfLines={2}>{item.body}</Text>
           </View>
           <Switch
