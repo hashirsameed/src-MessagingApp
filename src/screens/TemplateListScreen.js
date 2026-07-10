@@ -1,7 +1,7 @@
 import React, { useState, useCallback } from 'react';
 import {
   View, Text, FlatList, TouchableOpacity, Switch,
-  StyleSheet, StatusBar, Platform,
+  StyleSheet, StatusBar, Platform, ActivityIndicator,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { getAllTemplates, deleteTemplate, toggleTemplateActive } from '../database/templateDB';
@@ -10,10 +10,39 @@ import { cancelAlarmsForTemplate, rescheduleAlarmsForTemplate } from '../utils/a
 import { formatTemplateSendTime } from '../utils/dateFormat';
 import { handleError, showError, showConfirm, ErrorMessages } from '../utils/errorHandler';
 import { InlineLoader } from '../components/LoadingSpinner';
+import { hasWhatsAppCredentials, hasBusinessAccountId } from '../utils/whatsappService';
+import WhatsAppTemplatesScreen from './WhatsAppTemplatesScreen';
 
 export default function TemplateListScreen({ navigation }) {
   const [templates, setTemplates] = useState([]);
   const [loading, setLoading]     = useState(true);
+
+  // 'local' = existing reminder templates, 'whatsapp' = Meta Cloud API templates
+  const [activeTab, setActiveTab]     = useState('local');
+  const [waChecking, setWaChecking]   = useState(true);
+  const [waConfigured, setWaConfigured] = useState(false);
+
+  const checkWaConfig = useCallback(async () => {
+    try {
+      setWaChecking(true);
+      const [creds, waba] = await Promise.all([
+        hasWhatsAppCredentials(),
+        hasBusinessAccountId(),
+      ]);
+      setWaConfigured(creds && waba);
+    } catch (error) {
+      handleError(error, 'TemplateListScreen.checkWaConfig');
+      setWaConfigured(false);
+    } finally {
+      setWaChecking(false);
+    }
+  }, []);
+
+  useFocusEffect(useCallback(() => {
+    if (activeTab === 'whatsapp') {
+      checkWaConfig();
+    }
+  }, [activeTab, checkWaConfig]));
 
   const loadTemplates = () => {
     try {
@@ -28,6 +57,13 @@ export default function TemplateListScreen({ navigation }) {
   };
 
   useFocusEffect(useCallback(() => { loadTemplates(); }, []));
+
+  const handleTabPress = (tab) => {
+    setActiveTab(tab);
+    if (tab === 'whatsapp') {
+      checkWaConfig();
+    }
+  };
 
   /**
    * Toggling ON/OFF has two effects:
@@ -129,37 +165,97 @@ export default function TemplateListScreen({ navigation }) {
     );
   };
 
+  const renderWhatsAppTab = () => {
+    if (waChecking) {
+      return (
+        <View style={styles.center}>
+          <ActivityIndicator size="large" color="#1A1A2E" />
+        </View>
+      );
+    }
+
+    if (!waConfigured) {
+      return (
+        <View style={styles.center}>
+          <Text style={styles.emptyIcon}>⚠️</Text>
+          <Text style={styles.emptyTitle}>Configure credentials first</Text>
+          <Text style={styles.emptySubtitle}>
+            Set up your WhatsApp API access token, phone number ID, and business
+            account ID before you can manage WhatsApp templates.
+          </Text>
+          <TouchableOpacity
+            style={styles.configureBtn}
+            onPress={() => navigation.navigate('WhatsAppConfig')}
+            activeOpacity={0.8}>
+            <Text style={styles.configureBtnText}>🔧 Configure WhatsApp</Text>
+          </TouchableOpacity>
+        </View>
+      );
+    }
+
+    return <WhatsAppTemplatesScreen />;
+  };
+
   return (
     <View style={styles.container}>
       <StatusBar backgroundColor="#fff" barStyle="dark-content" />
       <View style={styles.header}>
         <Text style={styles.headerTitle}>Templates</Text>
         <Text style={styles.headerSubtitle}>
-          {loading ? 'Loading...' : `${templates.length} template${templates.length !== 1 ? 's' : ''}`}
+          {activeTab === 'local'
+            ? (loading ? 'Loading...' : `${templates.length} template${templates.length !== 1 ? 's' : ''}`)
+            : 'WhatsApp Cloud API templates'}
         </Text>
       </View>
 
-      {loading ? (
-        <InlineLoader message="Loading templates..." />
-      ) : (
-        <FlatList
-          data={templates}
-          keyExtractor={(item) => item.id}
-          renderItem={renderItem}
-          contentContainerStyle={{ padding: 16, paddingBottom: 100 }}
-          ListEmptyComponent={
-            <View style={styles.emptyContainer}>
-              <Text style={styles.emptyIcon}>📝</Text>
-              <Text style={styles.emptyTitle}>No Templates Yet</Text>
-              <Text style={styles.emptySubtitle}>Create your first template to get started</Text>
-            </View>
-          }
-        />
-      )}
+      <View style={styles.tabBar}>
+        <TouchableOpacity
+          style={[styles.tabBtn, activeTab === 'local' && styles.tabBtnActive]}
+          onPress={() => handleTabPress('local')}
+          activeOpacity={0.8}>
+          <Text style={[styles.tabBtnText, activeTab === 'local' && styles.tabBtnTextActive]}>
+            📝 Local
+          </Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.tabBtn, activeTab === 'whatsapp' && styles.tabBtnActive]}
+          onPress={() => handleTabPress('whatsapp')}
+          activeOpacity={0.8}>
+          <Text style={[styles.tabBtnText, activeTab === 'whatsapp' && styles.tabBtnTextActive]}>
+            💬 WhatsApp
+          </Text>
+        </TouchableOpacity>
+      </View>
 
-      <TouchableOpacity style={styles.fab} onPress={() => navigation.navigate('CreateTemplate')}>
-        <Text style={styles.fabText}>+ New Template</Text>
-      </TouchableOpacity>
+      {activeTab === 'local' ? (
+        <>
+          {loading ? (
+            <InlineLoader message="Loading templates..." />
+          ) : (
+            <FlatList
+              data={templates}
+              keyExtractor={(item) => item.id}
+              renderItem={renderItem}
+              contentContainerStyle={{ padding: 16, paddingBottom: 100 }}
+              ListEmptyComponent={
+                <View style={styles.emptyContainer}>
+                  <Text style={styles.emptyIcon}>📝</Text>
+                  <Text style={styles.emptyTitle}>No Templates Yet</Text>
+                  <Text style={styles.emptySubtitle}>Create your first template to get started</Text>
+                </View>
+              }
+            />
+          )}
+
+          <TouchableOpacity style={styles.fab} onPress={() => navigation.navigate('CreateTemplate')}>
+            <Text style={styles.fabText}>+ New Template</Text>
+          </TouchableOpacity>
+        </>
+      ) : (
+        <View style={{ flex: 1 }}>
+          {renderWhatsAppTab()}
+        </View>
+      )}
     </View>
   );
 }
@@ -169,6 +265,16 @@ const styles = StyleSheet.create({
   header:         { backgroundColor: '#fff', paddingHorizontal: 20, paddingTop: 20, paddingBottom: 16, borderBottomWidth: 1, borderBottomColor: '#F0F0F0' },
   headerTitle:    { fontSize: 28, fontWeight: '700', color: '#1A1A2E' },
   headerSubtitle: { fontSize: 14, color: '#888', marginTop: 2 },
+
+  tabBar:         { flexDirection: 'row', backgroundColor: '#fff', paddingHorizontal: 16, paddingTop: 12, paddingBottom: 4, borderBottomWidth: 1, borderBottomColor: '#F0F0F0', gap: 8 },
+  tabBtn:         { flex: 1, paddingVertical: 10, borderRadius: 10, alignItems: 'center', backgroundColor: '#F5F5F5' },
+  tabBtnActive:   { backgroundColor: '#1A1A2E' },
+  tabBtnText:     { fontSize: 13, fontWeight: '700', color: '#6B7280' },
+  tabBtnTextActive: { color: '#fff' },
+
+  center:         { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 24 },
+  configureBtn:   { marginTop: 20, backgroundColor: '#1A1A2E', borderRadius: 12, paddingVertical: 14, paddingHorizontal: 24 },
+  configureBtnText: { color: '#fff', fontWeight: '700', fontSize: 15 },
 
   card:           { backgroundColor: '#fff', borderRadius: 16, marginBottom: 12, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.06, shadowRadius: 8, elevation: 3 },
   cardInactive:   { opacity: 0.55 },

@@ -70,6 +70,42 @@ export const getDB = () => {
       );
     `);
 
+    // ── platform_type migration — registry-pattern dispatch (Step 1) ──────
+    // 'local_text'     → SMS, Email, Gmail, any custom Linking/url_scheme platform
+    // 'managed_remote' → WhatsApp (Meta Cloud API, approved templates)
+    try {
+      db.execute(`ALTER TABLE platforms ADD COLUMN platform_type TEXT NOT NULL DEFAULT 'local_text';`);
+    } catch (_) {}
+
+    try {
+      db.execute(`
+        UPDATE platforms
+        SET platform_type = 'managed_remote'
+        WHERE id = 'whatsapp' AND platform_type != 'managed_remote';
+      `);
+    } catch (error) {
+      console.log('platform_type backfill error:', error);
+    }
+
+    // 'sms' + 'whatsapp' are built-in and referenced by id in queueProcessor/
+    // schedulerEngine, but they don't live in the platforms table by default
+    // (only custom platforms + seeded Email/Gmail do — see platformDB.js).
+    // Seed both built-ins here so getAllPlatforms() becomes the single source
+    // of truth for tab rendering (Step 6) without touching dispatch (Step 5).
+    try {
+      db.execute(`
+        INSERT OR IGNORE INTO platforms (id, name, icon, url_scheme, platform_type)
+        VALUES ('sms', 'SMS', '💬', 'sms:{phone}?body={message}', 'local_text');
+      `);
+      db.execute(`
+        INSERT OR IGNORE INTO platforms (id, name, icon, url_scheme, platform_type)
+        VALUES ('whatsapp', 'WhatsApp', '🟢', '', 'managed_remote');
+      `);
+    } catch (error) {
+      console.log('built-in platform seed error:', error);
+    }
+    // ────────────────────────────────────────────────────────────────────
+
     db.execute(`
       CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,

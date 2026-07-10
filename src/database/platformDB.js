@@ -7,12 +7,14 @@ export const DEFAULT_PLATFORMS = [
     name: 'Email',
     icon: '📧',
     url_scheme: 'mailto:{phone}?body={message}',
+    platform_type: 'local_text',
   },
   {
     id: 'default_gmail',
     name: 'Gmail',
     icon: '✉️',
     url_scheme: 'mailto:{phone}?body={message}',
+    platform_type: 'local_text',
   },
 ];
 
@@ -31,8 +33,14 @@ export const insertPlatform = (platform) => {
   try {
     const db = getDB();
     db.execute(
-      'INSERT INTO platforms (id, name, icon, url_scheme) VALUES (?, ?, ?, ?);',
-      [platform.id, platform.name, platform.icon, platform.url_scheme]
+      'INSERT INTO platforms (id, name, icon, url_scheme, platform_type) VALUES (?, ?, ?, ?, ?);',
+      [
+        platform.id,
+        platform.name,
+        platform.icon,
+        platform.url_scheme,
+        platform.platform_type ?? 'local_text', // custom platforms are always Linking-based
+      ]
     );
     return true;
   } catch (error) {
