@@ -5,7 +5,7 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 
 import ContactListScreen from './src/screens/ContactListScreen';
-import TemplateListScreen from './src/screens/TemplateListScreen';
+import TemplatesScreen from './src/screens/TemplatesScreen';
 import CreateTemplateScreen from './src/screens/CreateTemplateScreen';
 import EditTemplateScreen from './src/screens/EditTemplateScreen';
 import PlatformSelectScreen from './src/screens/PlatformSelectScreen';
@@ -71,7 +71,7 @@ function MainTabs() {
 
       <Tab.Screen
         name="TemplateList"
-        component={TemplateListScreen}
+        component={TemplatesScreen}
         options={{
           tabBarLabel: 'Templates',
           tabBarIcon: () => <Text style={{ fontSize: 20 }}>📝</Text>,

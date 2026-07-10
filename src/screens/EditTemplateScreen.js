@@ -10,6 +10,7 @@ import { handleError, showError, showSuccess, ErrorMessages } from '../utils/err
 import { validateTemplateTitle, validateTemplateBody, validateOptionalTime } from '../utils/validators';
 import { parse12HourTimeTo24Hour, split24HourTimeTo12Hour } from '../utils/dateFormat';
 import { personalizeMessage } from '../utils/templateMatcher';
+import PlatformPicker from '../components/PlatformPicker';
 
 export default function EditTemplateScreen({ navigation, route }) {
   const { template, onSave } = route.params;
@@ -21,6 +22,7 @@ export default function EditTemplateScreen({ navigation, route }) {
   const [sendTime, setSendTime]     = useState(initialSendTime.time);
   const [sendMeridiem, setSendMeridiem] = useState(initialSendTime.meridiem);
   const [isActive, setIsActive]     = useState(template.is_active === 1);
+  const [platformId, setPlatformId] = useState(template.platform_id ?? 'sms');
   const [errors, setErrors]         = useState({});
   const [loading, setLoading]       = useState(false);
 
@@ -64,6 +66,7 @@ export default function EditTemplateScreen({ navigation, route }) {
         days_before: parseInt(daysBefore, 10),
         is_active: isActive ? 1 : 0,
         send_time: normalizedSendTime,
+        platform_id: platformId,
       };
 
       const ok = updateTemplate(updated);
@@ -125,6 +128,10 @@ export default function EditTemplateScreen({ navigation, route }) {
             onChangeText={(val) => { setTitle(val); setErrors(e => ({ ...e, title: '' })); }}
           />
           {errors.title ? <Text style={styles.errorText}>{errors.title}</Text> : null}
+
+          <View style={styles.divider} />
+
+          <PlatformPicker value={platformId} onChange={setPlatformId} />
 
           <View style={styles.divider} />
 

@@ -27,6 +27,24 @@ export const getDB = () => {
       db.execute(`ALTER TABLE templates ADD COLUMN send_time TEXT;`);
     } catch (_) {}
 
+    // ── platform_id migration — per-template platform selection (Step 6a) ──
+    // NULL/unset means "use the global default platform" (settings) —
+    // fully backward-compatible with every template created before this.
+    try {
+      db.execute(`ALTER TABLE templates ADD COLUMN platform_id TEXT;`);
+    } catch (_) {}
+
+    try {
+      db.execute(`
+        UPDATE templates
+        SET platform_id = 'sms'
+        WHERE platform_id IS NULL;
+      `);
+    } catch (error) {
+      console.log('templates.platform_id backfill error:', error);
+    }
+    // ────────────────────────────────────────────────────────────────────
+
     db.execute(`
       CREATE TABLE IF NOT EXISTS contacts (
         id TEXT PRIMARY KEY,

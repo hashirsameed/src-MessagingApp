@@ -139,7 +139,7 @@ export const AlarmFiredTask = async (data) => {
       return;
     }
 
-    const defaultPlatform = getDefaultPlatform() || 'sms';
+    const defaultPlatform = template.platform_id || getDefaultPlatform() || 'sms';
     debugTrace('QueueInsertionBefore', {
       traceId, contactId, templateId, requestCode, platformId: defaultPlatform,
     });

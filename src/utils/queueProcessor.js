@@ -1,4 +1,4 @@
-import { Linking, Platform, PermissionsAndroid, NativeModules, AppState } from 'react-native';
+import { Platform } from 'react-native';
 import {
   claimPendingQueue, markAsSent, markAsFailed, revertToPending,
   countSmsSentInLastHour,
@@ -9,170 +9,27 @@ import { getAllPlatforms } from '../database/platformDB';
 import { getSmsPerHourLimit } from '../database/settingsDB';
 import { getDaysUntilExpiry, personalizeMessage } from './templateMatcher';
 import { handleError } from './errorHandler';
-import { sendWhatsAppMessage, hasWhatsAppCredentials } from './whatsappService';
 import { debugTrace, debugTraceError, debugTraceDuration, generateTraceId } from './debugTrace';
-
-const { SmsModule } = NativeModules;
+import { getAdapter } from '../platforms/registry';
+import { requestSmsPermission } from '../platforms/localTextAdapter'; // also self-registers 'local_text'
+import { isConfigured as hasWhatsAppCredentials } from '../platforms/whatsappAdapter'; // also self-registers 'managed_remote'
 
 export const FIXED_PLATFORMS = [
-  { id: 'sms',      name: 'SMS',      url_scheme: 'sms:{phone}?body={message}' },
-  { id: 'whatsapp', name: 'WhatsApp', url_scheme: '' },
-  { id: 'email',    name: 'Email',    url_scheme: 'mailto:{email}?subject={subject}&body={message}' },
-  { id: 'gmail',    name: 'Gmail',    url_scheme: 'googlegmail://co?to={email}&subject={subject}&body={message}' },
+  { id: 'sms',      name: 'SMS',      url_scheme: 'sms:{phone}?body={message}', platform_type: 'local_text' },
+  { id: 'whatsapp', name: 'WhatsApp', url_scheme: '', platform_type: 'managed_remote' },
+  { id: 'email',    name: 'Email',    url_scheme: 'mailto:{email}?subject={subject}&body={message}', platform_type: 'local_text' },
+  { id: 'gmail',    name: 'Gmail',    url_scheme: 'googlegmail://co?to={email}&subject={subject}&body={message}', platform_type: 'local_text' },
 ];
 
-const DEFAULT_EMAIL_SUBJECT = 'Important: Policy Renewal Reminder';
 const SMS_INTRA_SEND_DELAY_MS = 3500;
-
-const formatPhone = (phone, platformId) => {
-  const cleaned = phone.replace(/\D/g, '').replace(/^0/, '');
-  return `92${cleaned}`;
-};
-
-const buildUrl = (platform, contact, message) => {
-  let url = platform.url_scheme;
-  if (url.includes('{phone}')) {
-    url = url.replace('{phone}', formatPhone(contact.phone_number ?? '', platform.id));
-  }
-  if (url.includes('{email}')) {
-    url = url.replace('{email}', encodeURIComponent(contact.email ?? ''));
-  }
-  if (url.includes('{subject}')) {
-    url = url.replace('{subject}', encodeURIComponent(DEFAULT_EMAIL_SUBJECT));
-  }
-  if (url.includes('{message}')) {
-    url = url.replace('{message}', encodeURIComponent(message));
-  }
-  return url;
-};
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const requestSmsPermission = async () => {
-  debugTrace('RequestSmsPermissionBefore', {});
-  try {
-    // PermissionsAndroid.check() reads the current permission state directly
-    // from the OS — it does NOT need a foreground Activity. This is the path
-    // that must succeed when processQueue runs from a headless background
-    // task (alarm fired, safety-net worker): if the user already granted SMS
-    // permission once in foreground, check() correctly reports true here
-    // with zero UI involved.
-    const alreadyGranted = await PermissionsAndroid.check(
-      PermissionsAndroid.PERMISSIONS.SEND_SMS,
-    );
-    if (alreadyGranted) {
-      debugTrace('RequestSmsPermissionAfter', { granted: true, source: 'already_granted_check' });
-      return true;
-    }
-
-    // Not granted yet. PermissionsAndroid.request() shows a system dialog,
-    // which requires a foreground Activity — it reliably throws/rejects when
-    // called from a headless task with no Activity attached (background app,
-    // alarm-fired, safety-net). Attempting it there would just be a wasted
-    // exception, so only try it when the JS runtime is actually foregrounded.
-    if (AppState.currentState !== 'active') {
-      debugTrace('RequestSmsPermissionAfter', {
-        granted: false, source: 'not_granted_and_backgrounded', appState: AppState.currentState,
-      });
-      return false;
-    }
-
-    const granted = await PermissionsAndroid.request(
-      PermissionsAndroid.PERMISSIONS.SEND_SMS,
-      {
-        title: 'SMS Permission',
-        message: 'This app needs permission to send SMS messages automatically.',
-        buttonPositive: 'Allow',
-        buttonNegative: 'Deny',
-      },
-    );
-    const isGranted = granted === PermissionsAndroid.RESULTS.GRANTED;
-    debugTrace('RequestSmsPermissionAfter', { granted: isGranted, rawResult: granted, source: 'foreground_dialog' });
-    return isGranted;
-  } catch (error) {
-    debugTraceError('RequestSmsPermissionCatch', error, { function: 'requestSmsPermission' });
-    debugTrace('RequestSmsPermissionAfter', { granted: false, exitReason: 'exception' });
-    return false;
-  }
-};
-
-const sendNativeSms = async (phoneNumber, message, traceContext = {}) => {
-  debugTrace('SendNativeSmsBefore', {
-    ...traceContext,
-    phoneNumber,
-    messageLength: message?.length ?? 0,
-  });
-  if (!SmsModule) {
-    debugTrace('SendNativeSmsExit', {
-      ...traceContext,
-      exitReason: 'native_module_not_linked',
-    });
-    return { sent: false, reason: 'NATIVE_MODULE_NOT_LINKED' };
-  }
-  try {
-    debugTrace('NativeModuleSendSmsBefore', { ...traceContext, phoneNumber });
-    const resultCode = await SmsModule.sendSms(phoneNumber, message);
-    debugTrace('NativeModuleSendSmsAfter', {
-      ...traceContext,
-      phoneNumber,
-      resultCode,
-    });
-    if (resultCode === 'SENT') {
-      debugTrace('SendNativeSmsExit', { ...traceContext, outcome: 'sent', resultCode });
-      return { sent: true, reason: 'SENT' };
-    }
-    debugTrace('SendNativeSmsExit', { ...traceContext, outcome: 'failed', resultCode });
-    return { sent: false, reason: resultCode || 'UNKNOWN' };
-  } catch (error) {
-    debugTraceError('SendNativeSmsCatch', error, {
-      function: 'sendNativeSms',
-      ...traceContext,
-      phoneNumber,
-    });
-    return { sent: false, reason: `EXCEPTION_${error?.message ?? 'UNKNOWN'}` };
-  }
-};
-
-const sendViaLinking = async (platform, contact, message, traceContext = {}) => {
-  const url = buildUrl(platform, contact, message);
-  debugTrace('SendViaLinkingBefore', {
-    ...traceContext,
-    platformId: platform.id,
-    urlLength: url.length,
-  });
-  let supported = false;
-  try {
-    supported = await Linking.canOpenURL(url);
-  } catch (error) {
-    debugTraceError('SendViaLinkingCanOpenCatch', error, {
-      function: 'sendViaLinking',
-      ...traceContext,
-      platformId: platform.id,
-    });
-    supported = false;
-  }
-  debugTrace('SendViaLinkingCanOpenAfter', {
-    ...traceContext,
-    platformId: platform.id,
-    supported,
-  });
-  if (!supported) {
-    debugTrace('SendViaLinkingExit', {
-      ...traceContext,
-      platformId: platform.id,
-      exitReason: 'url_not_supported',
-    });
-    return false;
-  }
-  await Linking.openURL(url);
-  debugTrace('SendViaLinkingExit', {
-    ...traceContext,
-    platformId: platform.id,
-    outcome: 'opened',
-  });
-  return true;
-};
-
+// Registry-routed dispatch — looks up the adapter by platform_type and hands
+// off. Both adapters accept the same combined ctx and pick what they need
+// (local_text reads smsPermissionGranted, managed_remote reads waConfigured),
+// so this function stays platform-agnostic. Result vocabulary unchanged:
+// 'sent' | 'opened' | 'failed_<REASON>'.
 const dispatchItem = async (platform, contact, message, smsPermissionGranted, waConfigured, traceContext = {}) => {
   debugTrace('DispatchItemStart', {
     ...traceContext,
@@ -182,82 +39,8 @@ const dispatchItem = async (platform, contact, message, smsPermissionGranted, wa
     waConfigured,
   });
 
-  if (platform.id === 'whatsapp') {
-    if (!waConfigured) {
-      debugTrace('DispatchItemExit', {
-        ...traceContext,
-        platformId: 'whatsapp',
-        exitReason: 'whatsapp_not_configured',
-        result: 'failed_WHATSAPP_NOT_CONFIGURED',
-      });
-      return 'failed_WHATSAPP_NOT_CONFIGURED';
-    }
-    const phone = formatPhone(contact.phone_number ?? '', 'whatsapp');
-    debugTrace('WhatsAppRequestBefore', { ...traceContext, contactId: contact.id, phone });
-    const result = await sendWhatsAppMessage(phone, message, traceContext);
-    debugTrace('WhatsAppRequestAfter', {
-      ...traceContext,
-      contactId: contact.id,
-      success: result.success,
-      error: result.error ?? '',
-    });
-    if (result.success) {
-      debugTrace('DispatchItemExit', { ...traceContext, platformId: 'whatsapp', outcome: 'sent' });
-      return 'sent';
-    }
-    const failResult = `failed_WA_${(result.error ?? 'UNKNOWN').replace(/\s+/g, '_').toUpperCase()}`;
-    debugTrace('DispatchItemExit', {
-      ...traceContext, platformId: 'whatsapp', outcome: 'failed', result: failResult,
-    });
-    return failResult;
-  }
-
-  if (platform.id === 'sms') {
-    if (Platform.OS === 'android') {
-      if (!smsPermissionGranted) {
-        debugTrace('DispatchItemExit', {
-          ...traceContext, platformId: 'sms', exitReason: 'no_sms_permission', result: 'failed_NO_SMS_PERMISSION',
-        });
-        return 'failed_NO_SMS_PERMISSION';
-      }
-
-      const { sent, reason } = await sendNativeSms(contact.phone_number, message, traceContext);
-      if (sent) {
-        debugTrace('DispatchItemExit', { ...traceContext, platformId: 'sms', outcome: 'sent' });
-        return 'sent';
-      }
-
-      if (reason === 'NATIVE_MODULE_NOT_LINKED') {
-        debugTrace('DispatchItemSmsFallbackLinking', { ...traceContext, reason });
-        const opened = await sendViaLinking(platform, contact, message, traceContext);
-        const result = opened ? 'opened' : 'failed_SMS_PLATFORM_UNAVAILABLE';
-        debugTrace('DispatchItemExit', {
-          ...traceContext, platformId: 'sms', outcome: opened ? 'opened' : 'failed', result,
-        });
-        return result;
-      }
-
-      const failResult = `failed_${reason}`;
-      debugTrace('DispatchItemExit', { ...traceContext, platformId: 'sms', outcome: 'failed', result: failResult });
-      return failResult;
-    }
-
-    const opened = await sendViaLinking(platform, contact, message, traceContext);
-    const result = opened ? 'opened' : 'failed_SMS_PLATFORM_UNAVAILABLE';
-    debugTrace('DispatchItemExit', {
-      ...traceContext, platformId: 'sms', outcome: opened ? 'opened' : 'failed', result,
-    });
-    return result;
-  }
-
-  const opened = await sendViaLinking(platform, contact, message, traceContext);
-  if (opened) {
-    debugTrace('DispatchItemExit', { ...traceContext, platformId: platform.id, outcome: 'opened' });
-    return 'opened';
-  }
-  const failResult = `failed_PLATFORM_NOT_INSTALLED_${platform.id.toUpperCase()}`;
-  debugTrace('DispatchItemExit', { ...traceContext, platformId: platform.id, outcome: 'failed', result: failResult });
-  return failResult;
+  const adapter = getAdapter(platform.platform_type ?? 'local_text');
+  return adapter.dispatch(platform, contact, message, { smsPermissionGranted, waConfigured, traceContext });
 };
 
 // ---------------------------------------------------------------------------

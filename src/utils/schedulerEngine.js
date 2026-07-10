@@ -108,7 +108,8 @@ export const runExpiryCheck = async (parentTraceId = null) => {
       }
 
       matched.forEach((template) => {
-        const added = addToQueue(contact.id, template.id, defaultPlatform);
+        const platformId = template.platform_id || defaultPlatform;
+        const added = addToQueue(contact.id, template.id, platformId);
         debugTrace('ExpiryCheckContactQueued', {
           traceId,
           contactId: contact.id,
@@ -116,6 +117,7 @@ export const runExpiryCheck = async (parentTraceId = null) => {
           templateTitle: template.title,
           daysBefore: template.days_before,
           sendTime: template.send_time ?? 'expiry',
+          platformId,
           added,
         });
         if (added) queued += 1;
