@@ -137,24 +137,26 @@ export default function TemplatesScreen({ navigation }) {
         <Text style={styles.headerTitle}>Templates</Text>
       </View>
 
-      {/* Tab bar — dynamic from getAllPlatforms(). New platform = new tab, no code change. */}
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        style={styles.tabBar}
-        contentContainerStyle={styles.tabBarContent}>
-        {platforms.map((p) => (
-          <TouchableOpacity
-            key={p.id}
-            style={[styles.tab, activeTab === p.id && styles.tabActive]}
-            onPress={() => setActiveTab(p.id)}
-            activeOpacity={0.8}>
-            <Text style={[styles.tabText, activeTab === p.id && styles.tabTextActive]}>
-              {p.icon} {p.name}
-            </Text>
-          </TouchableOpacity>
-        ))}
-      </ScrollView>
+      {/* Tab bar — pill style */}
+      <View style={styles.tabBarWrap}>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.tabBarContent}>
+          {platforms.map((p) => (
+            <TouchableOpacity
+              key={p.id}
+              style={[styles.tab, activeTab === p.id && styles.tabActive]}
+              onPress={() => setActiveTab(p.id)}
+              activeOpacity={0.7}>
+              <Text style={styles.tabIcon}>{p.icon}</Text>
+              <Text style={[styles.tabText, activeTab === p.id && styles.tabTextActive]}>
+                {p.name}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
+      </View>
 
       {loading ? (
         <InlineLoader message="Loading templates..." />
@@ -194,11 +196,16 @@ const styles = StyleSheet.create({
   header:         { backgroundColor: '#fff', paddingHorizontal: 20, paddingTop: 20, paddingBottom: 12, borderBottomWidth: 1, borderBottomColor: '#F0F0F0' },
   headerTitle:    { fontSize: 28, fontWeight: '700', color: '#1A1A2E' },
 
-  tabBar:         { backgroundColor: '#fff', borderBottomWidth: 1, borderBottomColor: '#F0F0F0' },
-  tabBarContent:  { paddingHorizontal: 16, paddingVertical: 10, gap: 8 },
-  tab:            { paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20, backgroundColor: '#F8F9FA', borderWidth: 1.5, borderColor: '#EEEEEE' },
+  tabBarWrap:     { backgroundColor: '#fff', borderBottomWidth: 1, borderBottomColor: '#F0F0F0' },
+  tabBarContent:  { paddingHorizontal: 16, paddingVertical: 12, gap: 10 },
+  tab:            {
+    flexDirection: 'row', alignItems: 'center', flexShrink: 0,
+    paddingHorizontal: 18, height: 40, borderRadius: 20,
+    backgroundColor: '#fff', borderWidth: 1.5, borderColor: '#E5E7EB',
+  },
   tabActive:      { backgroundColor: '#1A1A2E', borderColor: '#1A1A2E' },
-  tabText:        { fontSize: 13, fontWeight: '600', color: '#1A1A2E' },
+  tabIcon:        { fontSize: 14, marginRight: 6 },
+  tabText:        { fontSize: 14, fontWeight: '600', color: '#1A1A2E' },
   tabTextActive:  { color: '#fff' },
 
   card:           { backgroundColor: '#fff', borderRadius: 16, marginBottom: 12, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.06, shadowRadius: 8, elevation: 3 },
