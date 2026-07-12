@@ -49,6 +49,28 @@ export const insertPlatform = (platform) => {
   }
 };
 
+export const getEnabledPlatforms = () => {
+  try {
+    const db = getDB();
+    const result = db.execute('SELECT * FROM platforms WHERE is_enabled = 1 ORDER BY name ASC;');
+    return result.rows?._array || [];
+  } catch (error) {
+    handleError(error, 'getEnabledPlatforms');
+    return [];
+  }
+};
+
+export const togglePlatformEnabled = (id, enabled) => {
+  try {
+    const db = getDB();
+    db.execute('UPDATE platforms SET is_enabled = ? WHERE id = ?;', [enabled ? 1 : 0, id]);
+    return true;
+  } catch (error) {
+    handleError(error, 'togglePlatformEnabled');
+    return false;
+  }
+};
+
 export const deletePlatform = (id) => {
   try {
     const db = getDB();

@@ -124,6 +124,33 @@ export const getDB = () => {
     }
     // ────────────────────────────────────────────────────────────────────
 
+    // ── platform enable/disable toggle (Settings screen) ──────────────────
+    // 1 = active (shows as tab, sends reminders), 0 = paused (hidden, alarms
+    // cancelled but scheduled_alarms rows kept for history/re-enable).
+    try {
+      db.execute(`ALTER TABLE platforms ADD COLUMN is_enabled INTEGER NOT NULL DEFAULT 1;`);
+    } catch (_) {}
+    // ────────────────────────────────────────────────────────────────────
+
+    // ── WhatsApp (Meta) templates cache — local mirror ─────────────────────
+    // Meta template list only lives on Meta's servers; every screen that
+    // needs a WhatsApp template count (Templates pill badge, sorting) would
+    // otherwise need its own live API hit. Instead, whenever the WhatsApp
+    // tab actually fetches from Meta, it also upserts here — everyone else
+    // just reads this local cache. "Freshness" = whenever the WhatsApp tab
+    // was last opened, which is good enough for a count badge.
+    db.execute(`
+      CREATE TABLE IF NOT EXISTS whatsapp_templates_cache (
+        name TEXT PRIMARY KEY,
+        category TEXT,
+        language TEXT,
+        status TEXT,
+        body TEXT,
+        synced_at TEXT DEFAULT (datetime('now'))
+      );
+    `);
+    // ────────────────────────────────────────────────────────────────────
+
     db.execute(`
       CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,

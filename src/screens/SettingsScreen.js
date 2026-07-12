@@ -1,23 +1,17 @@
 import React, { useState, useCallback } from 'react';
 import {
   View, Text, TouchableOpacity, TextInput, StyleSheet,
-  StatusBar, ScrollView, Alert, ActivityIndicator, NativeModules, Platform,
+  StatusBar, ScrollView, Alert, ActivityIndicator, NativeModules, Platform, Switch,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { getDefaultPlatform, setDefaultPlatform, getSmsPerHourLimit, setSmsPerHourLimit } from '../database/settingsDB';
+import { getAllPlatforms, togglePlatformEnabled } from '../database/platformDB';
 import { handleError, showError, showSuccess, ErrorMessages } from '../utils/errorHandler';
 import { runExpiryCheck } from '../utils/scheduler';
 import { hasWhatsAppCredentials } from '../utils/whatsappService';
-import { canScheduleExactAlarms } from '../utils/alarmScheduler';
+import { canScheduleExactAlarms, cancelAlarmsForPlatform, rescheduleAlarmsForPlatform } from '../utils/alarmScheduler';
 
 const { AlarmModule } = NativeModules;
-
-const PLATFORM_OPTIONS = [
-  { id: 'sms',      name: 'SMS',      icon: '📱' },
-  { id: 'whatsapp', name: 'WhatsApp', icon: '💬' },
-  { id: 'email',    name: 'Email',    icon: '📧' },
-  { id: 'gmail',    name: 'Gmail',    icon: '📩' },
-];
 
 export default function SettingsScreen({ navigation }) {
   const [defaultPlatform, setDefaultPlatformState] = useState(null);
@@ -26,11 +20,14 @@ export default function SettingsScreen({ navigation }) {
   const [smsPerHour, setSmsPerHourState]            = useState('300');
   const [exactAlarmGranted, setExactAlarmGranted]   = useState(true);
   const [batteryExempt, setBatteryExempt]           = useState(true);
+  const [platforms, setPlatforms]                   = useState([]);
+  const [expandedIds, setExpandedIds]               = useState(new Set());
 
   const loadSettings = async () => {
     try {
       setDefaultPlatformState(getDefaultPlatform());
       setSmsPerHourState(String(getSmsPerHourLimit()));
+      setPlatforms(getAllPlatforms());
       const configured = await hasWhatsAppCredentials();
       setWaConfigured(configured);
 
@@ -67,6 +64,15 @@ export default function SettingsScreen({ navigation }) {
     }, []),
   );
 
+  const toggleExpand = (id) => {
+    setExpandedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
   const handleSelectPlatform = (platform) => {
     try {
       const ok = setDefaultPlatform(platform.id);
@@ -91,6 +97,29 @@ export default function SettingsScreen({ navigation }) {
       showSuccess('Saved', `SMS limit set to ${num} per hour.`);
     } catch (error) {
       handleError(error, 'SettingsScreen.handleSaveSmsLimit');
+      showError('Error', ErrorMessages.DB_WRITE);
+    }
+  };
+
+  const handlePlatformToggle = async (platform, value) => {
+    try {
+      const ok = togglePlatformEnabled(platform.id, value);
+      if (!ok) { showError('Error', ErrorMessages.DB_WRITE); return; }
+
+      if (Platform.OS === 'android') {
+        if (value) {
+          const results = await rescheduleAlarmsForPlatform(platform.id);
+          console.log(`[Settings] ${platform.name} enabled — ${results.length} alarm(s) rescheduled`);
+        } else {
+          const cancelledCount = await cancelAlarmsForPlatform(platform.id);
+          console.log(`[Settings] ${platform.name} disabled — ${cancelledCount} alarm(s) cancelled`);
+        }
+      }
+      setPlatforms((prev) =>
+        prev.map((p) => p.id === platform.id ? { ...p, is_enabled: value ? 1 : 0 } : p)
+      );
+    } catch (error) {
+      handleError(error, 'SettingsScreen.handlePlatformToggle');
       showError('Error', ErrorMessages.DB_WRITE);
     }
   };
@@ -134,28 +163,110 @@ export default function SettingsScreen({ navigation }) {
         <Text style={styles.headerSubtitle}>Manage app preferences</Text>
       </View>
 
-      {/* ── Default Platform ── */}
-      <Text style={styles.sectionLabel}>DEFAULT PLATFORM</Text>
+      {/* ── Platforms — one accordion card per platform, everything platform-
+          specific (enable toggle, default selection, rate limit, WhatsApp
+          config) lives inside its own card instead of scattered sections. ── */}
+      <Text style={styles.sectionLabel}>PLATFORMS</Text>
       <Text style={styles.sectionHint}>
-        Messages will be sent via this platform automatically.
+        Tap a platform to configure it. Turning it off pauses its reminders (Templates
+        screen tab is hidden too) without deleting anything — turn back on to resume.
       </Text>
 
-      {PLATFORM_OPTIONS.map((platform) => {
-        const isSelected = defaultPlatform === platform.id;
+      {platforms.map((platform) => {
+        const isExpanded = expandedIds.has(platform.id);
+        const isDefault  = defaultPlatform === platform.id;
+        const isEnabled  = platform.is_enabled === 1;
+        const isSms      = platform.id === 'sms';
+        const isWhatsApp = platform.platform_type === 'managed_remote';
+
         return (
-          <TouchableOpacity
-            key={platform.id}
-            style={[styles.card, isSelected && styles.cardSelected]}
-            onPress={() => handleSelectPlatform(platform)}
-            activeOpacity={0.7}>
-            <View style={styles.iconContainer}>
-              <Text style={styles.icon}>{platform.icon}</Text>
+          <View key={platform.id} style={styles.accCard}>
+            <View style={styles.accHeader}>
+              <TouchableOpacity
+                style={styles.accHeaderMain}
+                onPress={() => toggleExpand(platform.id)}
+                activeOpacity={0.7}>
+                <View style={styles.iconContainer}>
+                  <Text style={styles.icon}>{platform.icon}</Text>
+                </View>
+                <Text style={styles.label}>{platform.name}</Text>
+              </TouchableOpacity>
+
+              <Switch
+                value={isEnabled}
+                onValueChange={(v) => handlePlatformToggle(platform, v)}
+                trackColor={{ false: '#E0E0E0', true: '#1A1A2E' }}
+                thumbColor="#fff"
+              />
+
+              <TouchableOpacity
+                onPress={() => toggleExpand(platform.id)}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                <Text style={styles.chevron}>{isExpanded ? '⌃' : '›'}</Text>
+              </TouchableOpacity>
             </View>
-            <Text style={styles.label}>{platform.name}</Text>
-            <View style={[styles.radioOuter, isSelected && styles.radioOuterSelected]}>
-              {isSelected && <View style={styles.radioInner} />}
-            </View>
-          </TouchableOpacity>
+
+            {isExpanded && (
+              <View style={styles.accBody}>
+                {!isEnabled && (
+                  <Text style={styles.pausedNote}>
+                    ⏸ Paused — no reminders will be sent until you turn this back on.
+                  </Text>
+                )}
+
+                {isSms && (
+                  <View style={styles.accSection}>
+                    <Text style={styles.accSectionLabel}>Rate Limit</Text>
+                    <Text style={styles.accSectionHint}>
+                      Max SMS sent per rolling 60-minute window. Extra messages wait in the
+                      queue and send automatically — nothing is ever dropped.
+                    </Text>
+                    <View style={styles.smsLimitRow}>
+                      <TextInput
+                        style={styles.smsLimitInput}
+                        keyboardType="numeric"
+                        value={smsPerHour}
+                        onChangeText={(v) => setSmsPerHourState(v.replace(/[^0-9]/g, ''))}
+                        placeholder="e.g. 300"
+                        placeholderTextColor="#BDBDBD"
+                      />
+                      <TouchableOpacity
+                        onPress={handleSaveSmsLimit}
+                        style={styles.smsLimitSaveBtn}
+                        activeOpacity={0.8}>
+                        <Text style={styles.smsLimitSaveBtnText}>Save</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                )}
+
+                {isWhatsApp && (
+                  <TouchableOpacity
+                    style={styles.accRow}
+                    onPress={() => navigation.navigate('WhatsAppConfig')}
+                    activeOpacity={0.7}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.accRowLabel}>Configuration</Text>
+                      <Text style={[styles.waStatus, waConfigured ? styles.waStatusOk : styles.waStatusOff]}>
+                        {waConfigured ? '✅ Configured' : '⚠️ Not configured'}
+                      </Text>
+                    </View>
+                    <Text style={styles.chevron}>›</Text>
+                  </TouchableOpacity>
+                )}
+
+                <TouchableOpacity
+                  style={styles.defaultRow}
+                  onPress={() => handleSelectPlatform(platform)}
+                  activeOpacity={0.7}>
+                  <View style={[styles.radioOuter, isDefault && styles.radioOuterSelected]}>
+                    {isDefault && <View style={styles.radioInner} />}
+                  </View>
+                  <Text style={styles.defaultRowText}>Set as default platform</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+          </View>
         );
       })}
 
@@ -212,48 +323,6 @@ export default function SettingsScreen({ navigation }) {
         </>
       )}
 
-      {/* ── WhatsApp API Config ── */}
-      <Text style={[styles.sectionLabel, { marginTop: 28 }]}>WHATSAPP API</Text>
-      <Text style={styles.sectionHint}>
-        Configure Meta API credentials for fully automatic WhatsApp sending.
-      </Text>
-
-      <TouchableOpacity
-        style={[styles.card, styles.waCard]}
-        onPress={() => navigation.navigate('WhatsAppConfig')}
-        activeOpacity={0.7}>
-        <View style={styles.iconContainer}>
-          <Text style={styles.icon}>💬</Text>
-        </View>
-        <View style={{ flex: 1 }}>
-          <Text style={styles.label}>WhatsApp Configuration</Text>
-          <Text style={[styles.waStatus, waConfigured ? styles.waStatusOk : styles.waStatusOff]}>
-            {waConfigured ? '✅ Configured' : '⚠️ Not configured'}
-          </Text>
-        </View>
-        <Text style={styles.chevron}>›</Text>
-      </TouchableOpacity>
-
-      {/* ── SMS Rate Limit ── */}
-      <Text style={[styles.sectionLabel, { marginTop: 28 }]}>SMS RATE LIMIT</Text>
-      <Text style={styles.sectionHint}>
-        Max SMS messages sent per rolling 60-minute window. Extra messages wait in the queue and send automatically once the window frees up — nothing is ever dropped.
-      </Text>
-
-      <View style={[styles.card, styles.smsLimitCard]}>
-        <TextInput
-          style={styles.smsLimitInput}
-          keyboardType="numeric"
-          value={smsPerHour}
-          onChangeText={(v) => setSmsPerHourState(v.replace(/[^0-9]/g, ''))}
-          placeholder="e.g. 300"
-          placeholderTextColor="#BDBDBD"
-        />
-        <TouchableOpacity onPress={handleSaveSmsLimit} style={styles.smsLimitSaveBtn} activeOpacity={0.8}>
-          <Text style={styles.smsLimitSaveBtnText}>Save</Text>
-        </TouchableOpacity>
-      </View>
-
       {/* ── Scheduler (Dev/Testing only — hidden in production builds) ── */}
       {__DEV__ && (
         <>
@@ -305,6 +374,7 @@ const styles = StyleSheet.create({
     fontSize: 12, color: '#9E9E9E', marginHorizontal: 16, marginBottom: 14, lineHeight: 17,
   },
 
+  // Generic card (still used by Background Reliability rows)
   card: {
     backgroundColor: '#fff', borderRadius: 14, padding: 16,
     marginHorizontal: 16, marginBottom: 10,
@@ -313,7 +383,6 @@ const styles = StyleSheet.create({
     shadowColor: '#000', shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.04, shadowRadius: 4, elevation: 2,
   },
-  cardSelected: { borderColor: '#1A1A2E', backgroundColor: '#FAFAFA' },
   waCard:       { alignItems: 'center' },
   iconContainer: {
     width: 48, height: 48, borderRadius: 12,
@@ -339,10 +408,50 @@ const styles = StyleSheet.create({
     fontSize: 12, color: '#9E9E9E', marginHorizontal: 16, marginTop: 8, textAlign: 'center',
   },
 
-  smsLimitCard: { alignItems: 'center', gap: 12 },
+  // ── Accordion platform card ──
+  accCard: {
+    backgroundColor: '#fff', borderRadius: 14,
+    marginHorizontal: 16, marginBottom: 10,
+    borderWidth: 1.5, borderColor: '#F0F0F0',
+    shadowColor: '#000', shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.04, shadowRadius: 4, elevation: 2,
+    overflow: 'hidden',
+  },
+  accHeader: {
+    flexDirection: 'row', alignItems: 'center',
+    paddingHorizontal: 16, paddingVertical: 14, gap: 10,
+  },
+  accHeaderMain: { flex: 1, flexDirection: 'row', alignItems: 'center' },
+  accBody: {
+    borderTopWidth: 1, borderTopColor: '#F5F5F5',
+    paddingHorizontal: 16, paddingTop: 14, paddingBottom: 16,
+  },
+  accSection:      { marginBottom: 16 },
+  accSectionLabel: { fontSize: 13, fontWeight: '700', color: '#1A1A2E', marginBottom: 4 },
+  accSectionHint:  { fontSize: 12, color: '#9E9E9E', lineHeight: 17, marginBottom: 10 },
+
+  accRow: {
+    flexDirection: 'row', alignItems: 'center',
+    paddingVertical: 10, marginBottom: 14,
+    borderBottomWidth: 1, borderBottomColor: '#F5F5F5',
+  },
+  accRowLabel: { fontSize: 14, fontWeight: '600', color: '#1A1A2E' },
+
+  pausedNote: {
+    fontSize: 12, color: '#F59E0B', fontWeight: '600',
+    marginBottom: 14, backgroundColor: '#FFF8EB',
+    padding: 10, borderRadius: 10,
+  },
+
+  defaultRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  defaultRowText: { fontSize: 14, fontWeight: '600', color: '#1A1A2E' },
+
+  smsLimitRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   smsLimitInput: {
     flex: 1, fontSize: 16, color: '#1A1A2E',
-    paddingVertical: 4,
+    paddingVertical: 8, paddingHorizontal: 12,
+    backgroundColor: '#F8F9FA', borderRadius: 10,
+    borderWidth: 1, borderColor: '#EEEEEE',
   },
   smsLimitSaveBtn: {
     backgroundColor: '#1A1A2E', paddingHorizontal: 18,

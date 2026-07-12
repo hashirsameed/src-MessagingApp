@@ -6,6 +6,7 @@ import {
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { fetchMetaTemplates, createMetaTemplate } from '../utils/metaTemplateService';
+import { syncWhatsAppTemplatesCache } from '../database/whatsappTemplateCacheDB';
 import { CATEGORIES, LANGUAGES } from '../utils/metaTemplateValidator';
 import {
   formatTemplateName,
@@ -49,6 +50,7 @@ export default function WhatsAppTemplatesScreen() {
       const result = await fetchMetaTemplates();
       if (result.success) {
         setTemplates(result.templates);
+        syncWhatsAppTemplatesCache(result.templates);
       } else {
         setTemplates([]);
         setLoadError({ code: result.errorCode, message: result.error });

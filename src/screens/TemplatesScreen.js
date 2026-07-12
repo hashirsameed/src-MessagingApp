@@ -6,7 +6,8 @@ import {
 import { useFocusEffect } from '@react-navigation/native';
 import { getAllTemplates, deleteTemplate, toggleTemplateActive } from '../database/templateDB';
 import { getAllContacts } from '../database/contactDB';
-import { getAllPlatforms, seedDefaultPlatforms } from '../database/platformDB';
+import { getEnabledPlatforms, seedDefaultPlatforms } from '../database/platformDB';
+import { getCachedWhatsAppTemplateCount } from '../database/whatsappTemplateCacheDB';
 import { cancelAlarmsForTemplate, rescheduleAlarmsForTemplate } from '../utils/alarmScheduler';
 import { formatTemplateSendTime, formatDaysLabel } from '../utils/dateFormat';
 import { handleError, showError, showConfirm, ErrorMessages } from '../utils/errorHandler';
@@ -17,17 +18,39 @@ export default function TemplatesScreen({ navigation }) {
   const [platforms, setPlatforms]   = useState([]);
   const [activeTab, setActiveTab]   = useState('sms');
   const [templates, setTemplates]   = useState([]);
+  const [templateCounts, setTemplateCounts] = useState({});
   const [loading, setLoading]       = useState(true);
 
   const loadAll = () => {
     try {
       setLoading(true);
       seedDefaultPlatforms();
-      const allPlatforms = getAllPlatforms();
-      setPlatforms(allPlatforms);
+      const allPlatforms = getEnabledPlatforms();
+      const allTemplates = getAllTemplates();
+
+      // Count local templates per platform, then sort tabs so the platform
+      // with the most templates leads. WhatsApp (managed_remote) templates
+      // live on Meta's servers, not in this local count — it sorts using 0
+      // unless it ties, so it settles near the end unless it has local rows.
+      const countByPlatform = {};
+      allTemplates.forEach((t) => {
+        const pid = t.platform_id ?? 'sms';
+        countByPlatform[pid] = (countByPlatform[pid] ?? 0) + 1;
+      });
+      // WhatsApp templates aren't in the local `templates` table — they're
+      // cached separately from the last successful Meta fetch (see
+      // WhatsAppTemplatesScreen + whatsappTemplateCacheDB).
+      countByPlatform['whatsapp'] = getCachedWhatsAppTemplateCount();
+
+      const sortedPlatforms = [...allPlatforms].sort(
+        (a, b) => (countByPlatform[b.id] ?? 0) - (countByPlatform[a.id] ?? 0)
+      );
+
+      setPlatforms(sortedPlatforms);
+      setTemplateCounts(countByPlatform);
       // Keep current tab if it still exists, else fall back to first platform.
-      setActiveTab((prev) => (allPlatforms.some((p) => p.id === prev) ? prev : (allPlatforms[0]?.id ?? 'sms')));
-      setTemplates(getAllTemplates());
+      setActiveTab((prev) => (sortedPlatforms.some((p) => p.id === prev) ? prev : (sortedPlatforms[0]?.id ?? 'sms')));
+      setTemplates(allTemplates);
     } catch (error) {
       handleError(error, 'TemplatesScreen.loadAll');
       showError('Error', ErrorMessages.DB_READ);
@@ -143,18 +166,29 @@ export default function TemplatesScreen({ navigation }) {
           horizontal
           showsHorizontalScrollIndicator={false}
           contentContainerStyle={styles.tabBarContent}>
-          {platforms.map((p) => (
-            <TouchableOpacity
-              key={p.id}
-              style={[styles.tab, activeTab === p.id && styles.tabActive]}
-              onPress={() => setActiveTab(p.id)}
-              activeOpacity={0.7}>
-              <Text style={styles.tabIcon}>{p.icon}</Text>
-              <Text style={[styles.tabText, activeTab === p.id && styles.tabTextActive]}>
-                {p.name}
-              </Text>
-            </TouchableOpacity>
-          ))}
+          {platforms.map((p) => {
+            const count = templateCounts[p.id] ?? 0;
+            const isActive = activeTab === p.id;
+            return (
+              <TouchableOpacity
+                key={p.id}
+                style={[styles.tab, isActive && styles.tabActive]}
+                onPress={() => setActiveTab(p.id)}
+                activeOpacity={0.7}>
+                <Text style={styles.tabIcon}>{p.icon}</Text>
+                <Text style={[styles.tabText, isActive && styles.tabTextActive]}>
+                  {p.name}
+                </Text>
+                {count > 0 && (
+                  <View style={[styles.tabBadge, isActive && styles.tabBadgeActive]}>
+                    <Text style={[styles.tabBadgeText, isActive && styles.tabBadgeTextActive]}>
+                      {count}
+                    </Text>
+                  </View>
+                )}
+              </TouchableOpacity>
+            );
+          })}
         </ScrollView>
       </View>
 
@@ -196,17 +230,26 @@ const styles = StyleSheet.create({
   header:         { backgroundColor: '#fff', paddingHorizontal: 20, paddingTop: 20, paddingBottom: 12, borderBottomWidth: 1, borderBottomColor: '#F0F0F0' },
   headerTitle:    { fontSize: 28, fontWeight: '700', color: '#1A1A2E' },
 
-  tabBarWrap:     { backgroundColor: '#fff', borderBottomWidth: 1, borderBottomColor: '#F0F0F0' },
-  tabBarContent:  { paddingHorizontal: 16, paddingVertical: 12, gap: 10 },
+  tabBarWrap:     { backgroundColor: '#F8F9FA' },
+  tabBarContent:  { paddingHorizontal: 16, paddingVertical: 10, gap: 8 },
   tab:            {
     flexDirection: 'row', alignItems: 'center', flexShrink: 0,
-    paddingHorizontal: 18, height: 40, borderRadius: 20,
-    backgroundColor: '#fff', borderWidth: 1.5, borderColor: '#E5E7EB',
+    paddingHorizontal: 14, height: 34, borderRadius: 17,
+    backgroundColor: '#F8F9FA', borderWidth: 1, borderColor: '#DEE1E6',
   },
   tabActive:      { backgroundColor: '#1A1A2E', borderColor: '#1A1A2E' },
-  tabIcon:        { fontSize: 14, marginRight: 6 },
-  tabText:        { fontSize: 14, fontWeight: '600', color: '#1A1A2E' },
+  tabIcon:        { fontSize: 12, marginRight: 5 },
+  tabText:        { fontSize: 13, fontWeight: '600', color: '#1A1A2E' },
   tabTextActive:  { color: '#fff' },
+
+  tabBadge: {
+    marginLeft: 6, minWidth: 18, height: 18, borderRadius: 9,
+    paddingHorizontal: 5, backgroundColor: '#EDEFF2',
+    justifyContent: 'center', alignItems: 'center',
+  },
+  tabBadgeActive:     { backgroundColor: 'rgba(255,255,255,0.22)' },
+  tabBadgeText:       { fontSize: 10, fontWeight: '700', color: '#1A1A2E' },
+  tabBadgeTextActive: { color: '#fff' },
 
   card:           { backgroundColor: '#fff', borderRadius: 16, marginBottom: 12, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.06, shadowRadius: 8, elevation: 3 },
   cardInactive:   { opacity: 0.55 },
