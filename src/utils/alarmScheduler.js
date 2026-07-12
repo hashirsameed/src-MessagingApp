@@ -10,6 +10,9 @@ import {
 import { debugTrace, debugTraceError, debugTraceDuration, generateTraceId } from './debugTrace';
 import { toPakistanParts, pakistanPartsToUtcMs } from './pakistanTime';
 
+import { getAllTemplates } from '../database/templateDB';
+import { getAllContacts } from '../database/contactDB';
+
 const { AlarmModule } = NativeModules;
 const IMMEDIATE_ALARM_DELAY_MS = 10000;
 
@@ -356,4 +359,27 @@ export const rearmAllScheduledAlarmsAfterBoot = async () => {
   }
 
   return rearmed;
+};
+export const cancelAlarmsForPlatform = async (platformId) => {
+  const templates = getAllTemplates().filter(
+    (t) => (t.platform_id ?? 'sms') === platformId
+  );
+  let total = 0;
+  for (const template of templates) {
+    total += await cancelAlarmsForTemplate(template.id);
+  }
+  return total;
+};
+
+export const rescheduleAlarmsForPlatform = async (platformId) => {
+  const templates = getAllTemplates()
+    .filter((t) => (t.platform_id ?? 'sms') === platformId && t.is_active === 1);
+  const contacts = getAllContacts();
+
+  let results = [];
+  for (const template of templates) {
+    const r = await rescheduleAlarmsForTemplate(template, contacts);
+    results = results.concat(r);
+  }
+  return results;
 };
