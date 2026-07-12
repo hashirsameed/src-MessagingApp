@@ -1,7 +1,7 @@
 import React, { useState, useCallback } from 'react';
 import {
   View, Text, TouchableOpacity, TextInput, StyleSheet,
-  StatusBar, ScrollView, Alert, ActivityIndicator, NativeModules, Platform, Switch,
+  StatusBar, ScrollView, Alert, ActivityIndicator, NativeModules, Platform, Switch, PermissionsAndroid,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { getDefaultPlatform, setDefaultPlatform, getSmsPerHourLimit, setSmsPerHourLimit } from '../database/settingsDB';
@@ -9,7 +9,9 @@ import { getAllPlatforms, togglePlatformEnabled } from '../database/platformDB';
 import { handleError, showError, showSuccess, ErrorMessages } from '../utils/errorHandler';
 import { runExpiryCheck } from '../utils/scheduler';
 import { hasWhatsAppCredentials } from '../utils/whatsappService';
+import { requestSmsPermission } from '../platforms/localTextAdapter';
 import { canScheduleExactAlarms, cancelAlarmsForPlatform, rescheduleAlarmsForPlatform } from '../utils/alarmScheduler';
+import ModernToggle from '../components/ModernToggle';
 
 const { AlarmModule } = NativeModules;
 
@@ -20,6 +22,7 @@ export default function SettingsScreen({ navigation }) {
   const [smsPerHour, setSmsPerHourState]            = useState('300');
   const [exactAlarmGranted, setExactAlarmGranted]   = useState(true);
   const [batteryExempt, setBatteryExempt]           = useState(true);
+  const [smsGranted, setSmsGranted]                 = useState(true);
   const [platforms, setPlatforms]                   = useState([]);
   const [expandedIds, setExpandedIds]               = useState(new Set());
 
@@ -35,14 +38,16 @@ export default function SettingsScreen({ navigation }) {
       // start — the user can revoke either permission from system Settings
       // at any point, and the app has no other way to notice that happened.
       if (Platform.OS === 'android') {
-        const [exactGranted, ignoringBattery] = await Promise.all([
+        const [exactGranted, ignoringBattery, smsPermGranted] = await Promise.all([
           canScheduleExactAlarms(),
           AlarmModule?.isIgnoringBatteryOptimizations
             ? AlarmModule.isIgnoringBatteryOptimizations()
             : Promise.resolve(true),
+          PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.SEND_SMS),
         ]);
         setExactAlarmGranted(exactGranted);
         setBatteryExempt(ignoringBattery);
+        setSmsGranted(smsPermGranted);
       }
     } catch (error) {
       handleError(error, 'SettingsScreen.loadSettings');
@@ -56,6 +61,29 @@ export default function SettingsScreen({ navigation }) {
 
   const handleFixBattery = () => {
     AlarmModule?.requestIgnoreBatteryOptimizations?.();
+  };
+
+  // ── SMS permission toggle. Android gives apps no way to revoke a
+  // permission they already hold, so the "turn OFF" branch opens the
+  // app's System Settings page instead of trying (and silently failing)
+  // to flip anything in-process.
+  const handleSmsToggle = async (value) => {
+    if (value) {
+      const granted = await requestSmsPermission();
+      setSmsGranted(granted);
+      if (!granted) {
+        showError('Not granted', 'SMS permission was denied. You can still allow it from App Info → Permissions.');
+      }
+    } else {
+      Alert.alert(
+        'Turn off manually',
+        'Android doesn\'t let apps turn this off themselves. Opening App Info — look for Permissions → SMS and deny it there.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Open Settings', onPress: () => AlarmModule?.openAppSettings?.() },
+        ],
+      );
+    }
   };
 
   useFocusEffect(
@@ -276,6 +304,35 @@ export default function SettingsScreen({ navigation }) {
         </Text>
       )}
 
+      {/* ── Permissions — always visible, modern toggle row. Stays visible
+          all the time so the person can grant or revisit it anytime, not
+          just when something's already broken. ── */}
+      {Platform.OS === 'android' && (
+        <>
+          <Text style={[styles.sectionLabel, { marginTop: 28 }]}>PERMISSIONS</Text>
+          <Text style={styles.sectionHint}>
+            Controls whether the app can send SMS reminders automatically. Turning it
+            off routes you to Android's own settings screen — apps can't revoke their
+            own permissions.
+          </Text>
+
+          <View style={styles.permCard}>
+            <View style={styles.permRow}>
+              <View style={styles.permIconWrap}>
+                <Text style={styles.icon}>💬</Text>
+              </View>
+              <View style={styles.permTextWrap}>
+                <Text style={styles.permTitle}>SMS Sending Permission</Text>
+                <Text style={styles.permSubtitle}>
+                  {smsGranted ? 'Granted — SMS reminders can send' : 'Not granted — SMS reminders will fail'}
+                </Text>
+              </View>
+              <ModernToggle value={smsGranted} onValueChange={handleSmsToggle} />
+            </View>
+          </View>
+        </>
+      )}
+
       {/* ── Background Reliability ── */}
       {Platform.OS === 'android' && (!exactAlarmGranted || !batteryExempt) && (
         <>
@@ -407,6 +464,29 @@ const styles = StyleSheet.create({
   noDefaultText: {
     fontSize: 12, color: '#9E9E9E', marginHorizontal: 16, marginTop: 8, textAlign: 'center',
   },
+
+  // ── Permissions card ──
+  permCard: {
+    backgroundColor: '#fff', borderRadius: 16,
+    marginHorizontal: 16, marginBottom: 10,
+    borderWidth: 1.5, borderColor: '#F0F0F0',
+    shadowColor: '#000', shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.04, shadowRadius: 4, elevation: 2,
+    overflow: 'hidden',
+  },
+  permRow: {
+    flexDirection: 'row', alignItems: 'center',
+    paddingHorizontal: 16, paddingVertical: 14, gap: 12,
+  },
+  permIconWrap: {
+    width: 40, height: 40, borderRadius: 12,
+    backgroundColor: '#F8F9FA',
+    justifyContent: 'center', alignItems: 'center',
+  },
+  permTextWrap:  { flex: 1 },
+  permTitle:     { fontSize: 14, fontWeight: '700', color: '#1A1A2E' },
+  permSubtitle:  { fontSize: 11.5, color: '#9CA3AF', marginTop: 2, lineHeight: 15 },
+  permDivider:   { height: 1, backgroundColor: '#F5F5F5', marginLeft: 68 },
 
   // ── Accordion platform card ──
   accCard: {

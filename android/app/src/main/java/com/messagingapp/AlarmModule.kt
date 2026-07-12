@@ -286,4 +286,30 @@ class AlarmModule(reactContext: ReactApplicationContext) :
             promise.resolve(false)
         }
     }
+
+    /**
+     * Opens this app's own "App info" system settings page. Android gives
+     * apps no API to revoke a permission they already hold (SEND_SMS,
+     * notifications, etc) — the only way for the user to turn one back off
+     * is through this screen, so every "turn OFF" action on a permission
+     * toggle in Settings routes here instead of trying (and failing) to
+     * revoke anything in-process.
+     */
+    @ReactMethod
+    fun openAppSettings(promise: Promise) {
+        try {
+            TraceLog.d("AlarmModuleOpenAppSettingsStart")
+            val context = reactApplicationContext
+            val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                data = Uri.parse("package:${context.packageName}")
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+            context.startActivity(intent)
+            promise.resolve(true)
+            TraceLog.d("AlarmModuleOpenAppSettingsResolved", mapOf("result" to true))
+        } catch (error: Exception) {
+            TraceLog.e("AlarmModuleOpenAppSettingsException", error)
+            promise.resolve(false)
+        }
+    }
 }

@@ -7,7 +7,8 @@ import { useFocusEffect } from '@react-navigation/native';
 import { getAllTemplates, deleteTemplate, toggleTemplateActive } from '../database/templateDB';
 import { getAllContacts } from '../database/contactDB';
 import { getEnabledPlatforms, seedDefaultPlatforms } from '../database/platformDB';
-import { getCachedWhatsAppTemplateCount } from '../database/whatsappTemplateCacheDB';
+import { getCachedWhatsAppTemplateCount, syncWhatsAppTemplatesCache } from '../database/whatsappTemplateCacheDB';
+import { fetchMetaTemplates } from '../utils/metaTemplateService';
 import { cancelAlarmsForTemplate, rescheduleAlarmsForTemplate } from '../utils/alarmScheduler';
 import { formatTemplateSendTime, formatDaysLabel } from '../utils/dateFormat';
 import { handleError, showError, showConfirm, ErrorMessages } from '../utils/errorHandler';
@@ -21,40 +22,67 @@ export default function TemplatesScreen({ navigation }) {
   const [templateCounts, setTemplateCounts] = useState({});
   const [loading, setLoading]       = useState(true);
 
-  const loadAll = () => {
+  // Refreshes the WhatsApp template cache directly, instead of waiting for
+  // WhatsAppTemplatesScreen to have been opened at least once. Safe to call
+  // even when WhatsApp isn't configured — fetchMetaTemplates() just returns
+  // { success: false } in that case, nothing throws, nothing changes.
+  const refreshWhatsAppCache = async () => {
+    try {
+      const result = await fetchMetaTemplates();
+      if (result.success) {
+        syncWhatsAppTemplatesCache(result.templates);
+      }
+    } catch (error) {
+      handleError(error, 'TemplatesScreen.refreshWhatsAppCache');
+      // Non-fatal — badge just falls back to whatever was cached before.
+    }
+  };
+
+  const buildPlatformState = () => {
+    const allPlatforms = getEnabledPlatforms();
+    const allTemplates = getAllTemplates();
+
+    // Count local templates per platform, then sort tabs so the platform
+    // with the most templates leads. WhatsApp (managed_remote) templates
+    // live on Meta's servers, not in this local count — it sorts using 0
+    // unless it ties, so it settles near the end unless it has local rows.
+    const countByPlatform = {};
+    allTemplates.forEach((t) => {
+      const pid = t.platform_id ?? 'sms';
+      countByPlatform[pid] = (countByPlatform[pid] ?? 0) + 1;
+    });
+    // WhatsApp templates aren't in the local `templates` table — they're
+    // cached separately, refreshed by refreshWhatsAppCache() above on every
+    // load, not only when the WhatsApp tab happens to have been opened.
+    countByPlatform['whatsapp'] = getCachedWhatsAppTemplateCount();
+
+    const sortedPlatforms = [...allPlatforms].sort(
+      (a, b) => (countByPlatform[b.id] ?? 0) - (countByPlatform[a.id] ?? 0)
+    );
+
+    setPlatforms(sortedPlatforms);
+    setTemplateCounts(countByPlatform);
+    // Keep current tab if it still exists, else fall back to first platform.
+    setActiveTab((prev) => (sortedPlatforms.some((p) => p.id === prev) ? prev : (sortedPlatforms[0]?.id ?? 'sms')));
+    setTemplates(allTemplates);
+  };
+
+  const loadAll = async () => {
     try {
       setLoading(true);
       seedDefaultPlatforms();
-      const allPlatforms = getEnabledPlatforms();
-      const allTemplates = getAllTemplates();
 
-      // Count local templates per platform, then sort tabs so the platform
-      // with the most templates leads. WhatsApp (managed_remote) templates
-      // live on Meta's servers, not in this local count — it sorts using 0
-      // unless it ties, so it settles near the end unless it has local rows.
-      const countByPlatform = {};
-      allTemplates.forEach((t) => {
-        const pid = t.platform_id ?? 'sms';
-        countByPlatform[pid] = (countByPlatform[pid] ?? 0) + 1;
-      });
-      // WhatsApp templates aren't in the local `templates` table — they're
-      // cached separately from the last successful Meta fetch (see
-      // WhatsAppTemplatesScreen + whatsappTemplateCacheDB).
-      countByPlatform['whatsapp'] = getCachedWhatsAppTemplateCount();
+      // Show local data immediately, don't block the screen on the network
+      // call — then refresh the WA cache in the background and re-read
+      // counts once it lands, so the badge updates without a flicker/hang.
+      buildPlatformState();
+      setLoading(false);
 
-      const sortedPlatforms = [...allPlatforms].sort(
-        (a, b) => (countByPlatform[b.id] ?? 0) - (countByPlatform[a.id] ?? 0)
-      );
-
-      setPlatforms(sortedPlatforms);
-      setTemplateCounts(countByPlatform);
-      // Keep current tab if it still exists, else fall back to first platform.
-      setActiveTab((prev) => (sortedPlatforms.some((p) => p.id === prev) ? prev : (sortedPlatforms[0]?.id ?? 'sms')));
-      setTemplates(allTemplates);
+      await refreshWhatsAppCache();
+      buildPlatformState();
     } catch (error) {
       handleError(error, 'TemplatesScreen.loadAll');
       showError('Error', ErrorMessages.DB_READ);
-    } finally {
       setLoading(false);
     }
   };
