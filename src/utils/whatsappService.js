@@ -16,8 +16,8 @@
  */
 
 import * as Keychain from 'react-native-keychain';
-import { handleError } from './errorHandler';
-import { debugTrace, debugTraceError } from './debugTrace';
+import { handleError, handleRecoverableError } from './errorHandler';
+import { debugTrace, debugTraceError, debugTraceRecoverable } from './debugTrace';
 
 const KEYCHAIN_SERVICE = 'whatsapp_meta_credentials';
 const META_API_VERSION = 'v25.0';
@@ -159,17 +159,19 @@ export const clearWhatsAppCredentials = async () => {
 /**
  * Builds the request body for Meta's /messages endpoint.
  *
- * - DEV_MODE=true  -> always the approved "hello_world" template, regardless
- *                      of what `message` contains. Used to sanity-check the
- *                      API/credentials wiring without needing an approved
- *                      custom template yet.
- * - DEV_MODE=false -> sends the actual personalized `message` as a freeform
- *                      text message. Note: Meta only allows freeform text
- *                      within an open 24h customer service window; outside
- *                      that window this call will be rejected and you'll
- *                      need an approved message template instead.
+ * - DEV_MODE=true            -> always the approved "hello_world" template,
+ *                                regardless of anything else. Sanity-checks
+ *                                API/credentials wiring only.
+ * - metaTemplateName given   -> sends that specific APPROVED template, with
+ *                                one body parameter (paramValue — typically
+ *                                the contact's name, matching the {{1}} used
+ *                                across the app's WhatsApp templates so far).
+ * - neither                  -> falls back to freeform text. Meta only
+ *                                allows this within an open 24h customer
+ *                                service window; outside that window this
+ *                                call will be rejected.
  */
-const buildMessageBody = (toPhone, message) => {
+const buildMessageBody = (toPhone, message, metaTemplateName = null, metaTemplateLanguage = null, paramValue = null) => {
   if (DEV_MODE) {
     return {
       messaging_product: 'whatsapp',
@@ -179,6 +181,25 @@ const buildMessageBody = (toPhone, message) => {
       template: {
         name: DEV_TEMPLATE_NAME,
         language: { code: DEV_TEMPLATE_LANGUAGE },
+      },
+    };
+  }
+
+  if (metaTemplateName) {
+    return {
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to: toPhone,
+      type: 'template',
+      template: {
+        name: metaTemplateName,
+        language: { code: metaTemplateLanguage || 'en_US' },
+        // Single body parameter — every scheduled WhatsApp template built
+        // through the app so far uses one {{1}} placeholder for the
+        // contact's name. Multi-parameter templates aren't supported yet.
+        components: paramValue != null
+          ? [{ type: 'body', parameters: [{ type: 'text', text: String(paramValue) }] }]
+          : [],
       },
     };
   }
@@ -193,22 +214,31 @@ const buildMessageBody = (toPhone, message) => {
 };
 
 /**
- * Send a WhatsApp text message via Meta Cloud API.
- * Fully automatic — no user tap required.
+ * Send a WhatsApp message via Meta Cloud API. Fully automatic — no user
+ * tap required.
  *
- * See DEV_MODE above: while DEV_MODE is true, `message` is accepted but
- * ignored, and the "hello_world" template is sent instead.
+ * See DEV_MODE above: while DEV_MODE is true, everything below is ignored
+ * and the "hello_world" template is sent instead. Once DEV_MODE is off,
+ * pass metaTemplateName/metaTemplateLanguage (from the template's schedule
+ * row) to send that specific approved template instead of freeform text.
  *
  * @param {string} toPhone  Recipient phone with country code, no +, e.g. "923001234567"
- * @param {string} message  Plain text message body
+ * @param {string} message  Plain text message body (used only if no metaTemplateName)
+ * @param {object} [traceContext]
+ * @param {string} [metaTemplateName]
+ * @param {string} [metaTemplateLanguage]
+ * @param {string} [paramValue]  Value for the template's {{1}} — usually contact.name
  * @returns {Promise<{ success: boolean, error?: string }>}
  */
-export const sendWhatsAppMessage = async (toPhone, message, traceContext = {}) => {
+export const sendWhatsAppMessage = async (
+  toPhone, message, traceContext = {}, metaTemplateName = null, metaTemplateLanguage = null, paramValue = null,
+) => {
   debugTrace('SendWhatsAppMessageStart', {
     ...traceContext,
     toPhone,
     messageLength: message?.length ?? 0,
     devMode: DEV_MODE,
+    metaTemplateName: metaTemplateName ?? 'none',
   });
   try {
     if (DEV_MODE) {
@@ -236,7 +266,7 @@ export const sendWhatsAppMessage = async (toPhone, message, traceContext = {}) =
     const { accessToken, phoneNumberId } = creds;
 
     const url = `https://graph.facebook.com/${META_API_VERSION}/${phoneNumberId}/messages`;
-    const body = buildMessageBody(toPhone, message);
+    const body = buildMessageBody(toPhone, message, metaTemplateName, metaTemplateLanguage, paramValue);
 
     debugTrace('WhatsAppHttpRequestBefore', {
       ...traceContext,
@@ -283,12 +313,17 @@ export const sendWhatsAppMessage = async (toPhone, message, traceContext = {}) =
     });
     return { success: true };
   } catch (error) {
-    debugTraceError('SendWhatsAppMessageCatch', error, {
+    // This is the actual send-time network failure — no internet, DNS
+    // hiccup, etc. queueProcessor already handles a failed send gracefully
+    // (marks the item failed, keeps processing the rest of the queue), so
+    // this shouldn't pop LogBox's red screen over a background auto-send
+    // that recovers fine on its own.
+    debugTraceRecoverable('SendWhatsAppMessageCatch', error, {
       function: 'sendWhatsAppMessage',
       ...traceContext,
       toPhone,
     });
-    handleError(error, 'sendWhatsAppMessage');
+    handleRecoverableError(error, 'sendWhatsAppMessage');
     debugTrace('SendWhatsAppMessageExit', {
       ...traceContext,
       exitReason: 'network_error',
@@ -326,7 +361,7 @@ export const testWhatsAppConnection = async () => {
       displayName: data.verified_name ?? data.display_phone_number ?? 'Connected',
     };
   } catch (error) {
-    handleError(error, 'testWhatsAppConnection');
+    handleRecoverableError(error, 'testWhatsAppConnection');
     return { success: false, error: error.message ?? 'NETWORK_ERROR' };
   }
 };

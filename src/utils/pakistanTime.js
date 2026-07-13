@@ -71,3 +71,21 @@ export const formatPakistanDateTime = (isoOrDate) => {
   });
   return `${datePart}, ${timePart} PKT`;
 };
+
+// Date-only, no time-of-day — for the {expiry} token in outgoing messages.
+// Showing a time here was misleading: it isn't the contact's actual expiry
+// time, and in the template preview it showed whatever moment you happened
+// to be editing at, not the Send Time configured above. The date alone is
+// what a customer actually needs.
+export const formatPakistanDate = (isoOrDate) => {
+  if (!isoOrDate) return '—';
+  const date = typeof isoOrDate === 'string' ? new Date(isoOrDate) : isoOrDate;
+  if (Number.isNaN(date.getTime())) return '—';
+
+  return date.toLocaleDateString('en-GB', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    timeZone: PAKISTAN_TIME_ZONE,
+  });
+};

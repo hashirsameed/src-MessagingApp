@@ -7,7 +7,7 @@ import { useFocusEffect } from '@react-navigation/native';
 import { getAllTemplates, deleteTemplate, toggleTemplateActive } from '../database/templateDB';
 import { getAllContacts } from '../database/contactDB';
 import { getEnabledPlatforms, seedDefaultPlatforms } from '../database/platformDB';
-import { getCachedWhatsAppTemplateCount, syncWhatsAppTemplatesCache } from '../database/whatsappTemplateCacheDB';
+import { syncWhatsAppTemplatesCache } from '../database/whatsappTemplateCacheDB';
 import { fetchMetaTemplates } from '../utils/metaTemplateService';
 import { cancelAlarmsForTemplate, rescheduleAlarmsForTemplate } from '../utils/alarmScheduler';
 import { formatTemplateSendTime, formatDaysLabel } from '../utils/dateFormat';
@@ -43,18 +43,15 @@ export default function TemplatesScreen({ navigation }) {
     const allTemplates = getAllTemplates();
 
     // Count local templates per platform, then sort tabs so the platform
-    // with the most templates leads. WhatsApp (managed_remote) templates
-    // live on Meta's servers, not in this local count — it sorts using 0
-    // unless it ties, so it settles near the end unless it has local rows.
+    // with the most templates leads. Now that WhatsApp schedules are real
+    // local `templates` rows too (platform_id='whatsapp', pointing at an
+    // approved Meta template), this count is consistent across every
+    // platform — no separate WhatsApp-only override needed anymore.
     const countByPlatform = {};
     allTemplates.forEach((t) => {
       const pid = t.platform_id ?? 'sms';
       countByPlatform[pid] = (countByPlatform[pid] ?? 0) + 1;
     });
-    // WhatsApp templates aren't in the local `templates` table — they're
-    // cached separately, refreshed by refreshWhatsAppCache() above on every
-    // load, not only when the WhatsApp tab happens to have been opened.
-    countByPlatform['whatsapp'] = getCachedWhatsAppTemplateCount();
 
     const sortedPlatforms = [...allPlatforms].sort(
       (a, b) => (countByPlatform[b.id] ?? 0) - (countByPlatform[a.id] ?? 0)
@@ -223,8 +220,21 @@ export default function TemplatesScreen({ navigation }) {
       {loading ? (
         <InlineLoader message="Loading templates..." />
       ) : isManagedRemote ? (
-        // WhatsApp (Meta API) — untouched, existing screen embedded as-is.
-        <WhatsAppTemplatesScreen />
+        <>
+          {/* WhatsAppTemplatesScreen's own "+ New Template" button creates a
+              new Meta-approved template (category/language/approval flow).
+              This is a separate action: schedule a reminder using a template
+              that's already approved (days_before/send_time), same as the
+              SMS/Email flow — so it needs its own entry point. */}
+          <TouchableOpacity
+            style={styles.scheduleWaBtn}
+            onPress={() => navigation.navigate('CreateTemplate', { presetPlatformId: 'whatsapp' })}
+            activeOpacity={0.8}>
+            <Text style={styles.scheduleWaBtnText}>🗓 Schedule a Reminder with an Approved Template</Text>
+          </TouchableOpacity>
+          {/* WhatsApp (Meta API) — untouched, existing screen embedded as-is. */}
+          <WhatsAppTemplatesScreen />
+        </>
       ) : (
         <>
           <FlatList
@@ -278,6 +288,13 @@ const styles = StyleSheet.create({
   tabBadgeActive:     { backgroundColor: 'rgba(255,255,255,0.22)' },
   tabBadgeText:       { fontSize: 10, fontWeight: '700', color: '#1A1A2E' },
   tabBadgeTextActive: { color: '#fff' },
+
+  scheduleWaBtn: {
+    marginHorizontal: 16, marginTop: 12, marginBottom: 4,
+    backgroundColor: '#EEF2FF', borderRadius: 12, paddingVertical: 12,
+    alignItems: 'center', borderWidth: 1, borderColor: '#DDE3FF',
+  },
+  scheduleWaBtnText: { color: '#3730A3', fontSize: 13, fontWeight: '700' },
 
   card:           { backgroundColor: '#fff', borderRadius: 16, marginBottom: 12, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.06, shadowRadius: 8, elevation: 3 },
   cardInactive:   { opacity: 0.55 },

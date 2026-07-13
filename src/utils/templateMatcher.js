@@ -1,4 +1,4 @@
-import { toPakistanParts, pakistanPartsToUtcMs, formatPakistanDateTime } from './pakistanTime';
+import { toPakistanParts, pakistanPartsToUtcMs, formatPakistanDate } from './pakistanTime';
 
 /**
  * Days remaining until expiry, counted on the Pakistan calendar (not UTC,
@@ -35,10 +35,22 @@ export const findMatchingTemplate = (templates, daysLeft) => {
   return findMatchingTemplates(templates, daysLeft)[0] ?? null;
 };
 
+// Short inline wording for {days} inside a message — "Today"/"Tomorrow"/
+// "Yesterday" for the near cases, "3 days"/"3 days ago" otherwise. Kept
+// deliberately shorter than dateFormat.js's formatDaysLabel() (no "before/
+// after expiry" suffix) since {days} sits inside the template author's own
+// sentence, e.g. "Dear {name}! Days {days}" or "{days} din baaki hain".
+const formatDaysLeftInline = (n) => {
+  if (n === 0) return 'Today';
+  if (n === 1) return 'Tomorrow';
+  if (n === -1) return 'Yesterday';
+  return n > 0 ? `${n} days` : `${Math.abs(n)} days ago`;
+};
+
 export const personalizeMessage = (body, contact, daysLeft) => {
   return body
     .replace(/\{name\}/gi, contact.name ?? '')
     .replace(/\{phone\}/gi, contact.phone_number ?? '')
-    .replace(/\{days\}/gi, daysLeft.toString())
-    .replace(/\{expiry\}/gi, formatPakistanDateTime(contact.expiry_datetime));
+    .replace(/\{days\}/gi, formatDaysLeftInline(daysLeft))
+    .replace(/\{expiry\}/gi, formatPakistanDate(contact.expiry_datetime));
 };

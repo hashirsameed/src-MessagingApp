@@ -12,7 +12,7 @@
  *   - Malformed/unexpected JSON from Meta never crashes the caller
  */
 import { getWhatsAppCredentials } from './whatsappService';
-import { handleError } from './errorHandler';
+import { handleError, handleRecoverableError } from './errorHandler';
 
 const META_API_VERSION = 'v25.0';
 const REQUEST_TIMEOUT_MS = 15000; // 15s — Meta API can be slow under load
@@ -109,7 +109,7 @@ export const fetchMetaTemplates = async () => {
       });
     } catch (networkError) {
       const isTimeout = networkError?.name === 'AbortError';
-      handleError(networkError, 'fetchMetaTemplates.network');
+      handleRecoverableError(networkError, 'fetchMetaTemplates.network');
       return {
         success: false,
         errorCode: isTimeout ? 'TIMEOUT' : 'NETWORK_ERROR',
@@ -185,7 +185,7 @@ export const createMetaTemplate = async (templateData) => {
       });
     } catch (networkError) {
       const isTimeout = networkError?.name === 'AbortError';
-      handleError(networkError, 'createMetaTemplate.network');
+      handleRecoverableError(networkError, 'createMetaTemplate.network');
       return {
         success: false,
         errorCode: isTimeout ? 'TIMEOUT' : 'NETWORK_ERROR',

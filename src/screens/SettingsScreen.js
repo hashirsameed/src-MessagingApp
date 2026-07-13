@@ -401,6 +401,14 @@ export default function SettingsScreen({ navigation }) {
               : <><Text style={styles.runBtnIcon}>🔍</Text>
                  <Text style={styles.runBtnText}>Run Check Now</Text></>}
           </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.labBtn}
+            onPress={() => navigation.navigate('DevTestLab')}
+            activeOpacity={0.8}>
+            <Text style={styles.labBtnIcon}>🧪</Text>
+            <Text style={styles.labBtnText}>Open Testing Lab</Text>
+          </TouchableOpacity>
         </>
       )}
     </ScrollView>
@@ -547,4 +555,12 @@ const styles = StyleSheet.create({
   runBtnDisabled: { backgroundColor: '#BDBDBD' },
   runBtnIcon:     { fontSize: 16 },
   runBtnText:     { color: '#fff', fontSize: 15, fontWeight: '700' },
+
+  labBtn: {
+    flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 8,
+    marginTop: 10, marginHorizontal: 16, backgroundColor: '#EEF2FF',
+    borderRadius: 14, paddingVertical: 14, borderWidth: 1, borderColor: '#DDE3FF',
+  },
+  labBtnIcon: { fontSize: 15 },
+  labBtnText: { color: '#3730A3', fontSize: 14, fontWeight: '700' },
 });

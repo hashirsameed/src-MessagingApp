@@ -1,5 +1,5 @@
 import { Alert } from 'react-native';
-import { debugTraceError } from './debugTrace';
+import { debugTraceError, debugTraceRecoverable } from './debugTrace';
 
 export const ErrorMessages = {
   DB_READ: 'Failed to load data. Please restart the app.',
@@ -15,6 +15,15 @@ export const ErrorMessages = {
 
 export const handleError = (error, context = '') => {
   debugTraceError('HandleError', error, { function: context });
+};
+
+// For errors that are expected and already handled gracefully by the
+// caller — no internet, request timed out, etc — where the UI shows its
+// own friendly/retryable message. Logs to Metro for debugging without
+// popping React Native's LogBox red-screen overlay (which handleError's
+// console.error does, even for errors that aren't actually crashes).
+export const handleRecoverableError = (error, context = '') => {
+  debugTraceRecoverable('RecoverableError', error, { function: context });
 };
 
 export const showError = (title, message) => {

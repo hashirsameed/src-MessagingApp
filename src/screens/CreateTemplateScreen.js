@@ -1,14 +1,15 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, Switch,
   StyleSheet, KeyboardAvoidingView, Platform, ScrollView, StatusBar,
 } from 'react-native';
 import { insertTemplate } from '../database/templateDB';
 import { getAllContacts } from '../database/contactDB';
+import { getCachedApprovedWhatsAppTemplates } from '../database/whatsappTemplateCacheDB';
 import { rescheduleAlarmsForTemplate } from '../utils/alarmScheduler';
 import { handleError, showError, showSuccess, ErrorMessages } from '../utils/errorHandler';
 import { validateTemplateTitle, validateTemplateBody, validateOptionalTime } from '../utils/validators';
-import { parse12HourTimeTo24Hour } from '../utils/dateFormat';
+import { parse12HourTimeTo24Hour, formatDaysLabel } from '../utils/dateFormat';
 import { personalizeMessage } from '../utils/templateMatcher';
 import PlatformPicker from '../components/PlatformPicker';
 
@@ -22,14 +23,42 @@ export default function CreateTemplateScreen({ navigation, route }) {
   const [platformId, setPlatformId] = useState(route?.params?.presetPlatformId ?? 'sms');
   const [errors, setErrors]       = useState({});
 
+  // WhatsApp-only: which APPROVED Meta template this schedule sends. Meta
+  // rejects freeform text outside a live 24h session, so a WhatsApp row
+  // can't use the free-text body below — it must point at one specific
+  // approved template by name+language instead.
+  const [metaTemplateName, setMetaTemplateName]     = useState(null);
+  const [metaTemplateLanguage, setMetaTemplateLanguage] = useState(null);
+  const [approvedWaTemplates, setApprovedWaTemplates] = useState([]);
+  const isWhatsApp = platformId === 'whatsapp';
+
+  useEffect(() => {
+    if (isWhatsApp) {
+      setApprovedWaTemplates(getCachedApprovedWhatsAppTemplates());
+    }
+  }, [isWhatsApp]);
+
+  const selectMetaTemplate = (t) => {
+    setMetaTemplateName(t.name);
+    setMetaTemplateLanguage(t.language);
+    setBody(t.body ?? ''); // display-only mirror, not what actually gets sent
+    setErrors((e) => ({ ...e, metaTemplate: '' }));
+  };
+
   const validate = () => {
     const titleResult = validateTemplateTitle(title);
-    const bodyResult = validateTemplateBody(body);
     const timeResult = validateOptionalTime(sendTime);
     const e = {};
     if (!titleResult.valid) e.title = titleResult.message;
-    if (!bodyResult.valid)  e.body  = bodyResult.message;
     if (!timeResult.valid)  e.time  = timeResult.message;
+
+    if (isWhatsApp) {
+      if (!metaTemplateName) e.metaTemplate = 'Pick an approved WhatsApp template.';
+    } else {
+      const bodyResult = validateTemplateBody(body);
+      if (!bodyResult.valid) e.body = bodyResult.message;
+    }
+
     const d = parseInt(daysBefore, 10);
     if (isNaN(d)) e.days = 'Enter a valid integer (e.g. -3, 0, 7)';
     setErrors(e);
@@ -56,6 +85,8 @@ export default function CreateTemplateScreen({ navigation, route }) {
         is_active: isActive ? 1 : 0,
         send_time: normalizedSendTime,
         platform_id: platformId,
+        meta_template_name: isWhatsApp ? metaTemplateName : null,
+        meta_template_language: isWhatsApp ? metaTemplateLanguage : null,
       };
 
       const ok = insertTemplate(newTemplate);
@@ -194,22 +225,65 @@ export default function CreateTemplateScreen({ navigation, route }) {
 
           <View style={styles.divider} />
 
-          {/* Body */}
-          <Text style={styles.label}>Message Body</Text>
-          <Text style={styles.hint}>
-            Variables: {'{name}'} {'{days}'} {'{expiry}'} {'{phone}'}
-          </Text>
-          <TextInput
-            style={[styles.input, styles.textArea, errors.body && styles.inputError]}
-            placeholder="Dear {name}, your policy expires in {days} days on {expiry}."
-            placeholderTextColor="#BDBDBD"
-            value={body}
-            onChangeText={(v) => { setBody(v); setErrors(e => ({ ...e, body: '' })); }}
-            multiline
-            numberOfLines={6}
-            textAlignVertical="top"
-          />
-          {errors.body ? <Text style={styles.errorText}>{errors.body}</Text> : null}
+          {/* Body — SMS/Email/Gmail: free text. WhatsApp: pick an approved
+              Meta template instead (Meta rejects freeform text outside a
+              live session). */}
+          {isWhatsApp ? (
+            <>
+              <Text style={styles.label}>WhatsApp Template</Text>
+              <Text style={styles.hint}>
+                Only APPROVED templates can be scheduled. Manage/create templates from the
+                WhatsApp tab first if you don't see the one you need here.
+              </Text>
+              {approvedWaTemplates.length === 0 ? (
+                <View style={styles.waEmptyBox}>
+                  <Text style={styles.waEmptyText}>
+                    No approved WhatsApp templates found yet. Open the WhatsApp tab to sync,
+                    or wait for Meta to approve one.
+                  </Text>
+                </View>
+              ) : (
+                approvedWaTemplates.map((t) => {
+                  const selected = metaTemplateName === t.name;
+                  return (
+                    <TouchableOpacity
+                      key={t.name}
+                      style={[styles.waTemplateCard, selected && styles.waTemplateCardSelected]}
+                      onPress={() => selectMetaTemplate(t)}
+                      activeOpacity={0.8}>
+                      <View style={styles.waTemplateTop}>
+                        <Text style={styles.waTemplateName}>{t.name}</Text>
+                        {selected && <Text style={styles.waTemplateCheck}>✓</Text>}
+                      </View>
+                      <Text style={styles.waTemplateMeta}>{t.category} · {t.language}</Text>
+                      {t.body ? (
+                        <Text style={styles.waTemplateBody} numberOfLines={2}>{t.body}</Text>
+                      ) : null}
+                    </TouchableOpacity>
+                  );
+                })
+              )}
+              {errors.metaTemplate ? <Text style={styles.errorText}>{errors.metaTemplate}</Text> : null}
+            </>
+          ) : (
+            <>
+              <Text style={styles.label}>Message Body</Text>
+              <Text style={styles.hint}>
+                Variables: {'{name}'} {'{days}'} {'{expiry}'} {'{phone}'}
+              </Text>
+              <TextInput
+                style={[styles.input, styles.textArea, errors.body && styles.inputError]}
+                placeholder="Dear {name}, your policy expires in {days} days on {expiry}."
+                placeholderTextColor="#BDBDBD"
+                value={body}
+                onChangeText={(v) => { setBody(v); setErrors(e => ({ ...e, body: '' })); }}
+                multiline
+                numberOfLines={6}
+                textAlignVertical="top"
+              />
+              {errors.body ? <Text style={styles.errorText}>{errors.body}</Text> : null}
+            </>
+          )}
 
         </View>
 
@@ -217,7 +291,10 @@ export default function CreateTemplateScreen({ navigation, route }) {
         <View style={styles.previewCard}>
           <Text style={styles.previewLabel}>PREVIEW</Text>
           <Text style={styles.previewMeta}>
-            📅 {daysBefore || '?'} day{daysBefore !== '1' ? 's' : ''} before expiry
+            📅 {(() => {
+              const d = parseInt(daysBefore, 10);
+              return isNaN(d) ? '?' : formatDaysLabel(d);
+            })()}
             {'  '}•{'  '}
             {isActive ? '🟢 Active' : '🔴 Inactive'}
           </Text>
@@ -268,4 +345,20 @@ const styles = StyleSheet.create({
   saveBtnText:     { color: '#fff', fontWeight: '700', fontSize: 16 },
   cancelBtn:       { padding: 16, alignItems: 'center', marginBottom: 40 },
   cancelBtnText:   { color: '#9E9E9E', fontSize: 15, fontWeight: '500' },
+
+  waEmptyBox: {
+    backgroundColor: '#FFF8EB', borderRadius: 10, padding: 14,
+  },
+  waEmptyText: { fontSize: 12, color: '#92600C', lineHeight: 17 },
+
+  waTemplateCard: {
+    backgroundColor: '#F8F9FA', borderRadius: 10, padding: 12, marginBottom: 8,
+    borderWidth: 1.5, borderColor: '#EEEEEE',
+  },
+  waTemplateCardSelected: { borderColor: '#1A1A2E', backgroundColor: '#EEF2FF' },
+  waTemplateTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  waTemplateName: { fontSize: 13, fontWeight: '700', color: '#1A1A2E' },
+  waTemplateCheck: { fontSize: 14, fontWeight: '700', color: '#1A1A2E' },
+  waTemplateMeta: { fontSize: 10, color: '#9E9E9E', marginTop: 2 },
+  waTemplateBody: { fontSize: 12, color: '#4B5563', marginTop: 6, lineHeight: 16 },
 });

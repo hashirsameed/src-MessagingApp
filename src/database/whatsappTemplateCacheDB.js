@@ -18,11 +18,15 @@ export const syncWhatsAppTemplatesCache = (metaTemplates) => {
     db.execute('DELETE FROM whatsapp_templates_cache;');
 
     (metaTemplates ?? []).forEach((t) => {
+      // Meta's raw template object has no flat `.body` — the actual text
+      // (with {{1}}, {{2}} placeholders) lives inside components[] on the
+      // entry whose type is 'BODY'.
+      const bodyComponent = t.components?.find((c) => c.type === 'BODY');
       db.execute(
         `INSERT OR REPLACE INTO whatsapp_templates_cache
          (name, category, language, status, body, synced_at)
          VALUES (?, ?, ?, ?, ?, datetime('now'));`,
-        [t.name, t.category ?? null, t.language ?? null, t.status ?? null, t.body ?? null]
+        [t.name, t.category ?? null, t.language ?? null, t.status ?? null, bodyComponent?.text ?? null]
       );
     });
     return true;
@@ -39,6 +43,21 @@ export const getCachedWhatsAppTemplates = () => {
     return result.rows?._array || [];
   } catch (error) {
     handleError(error, 'getCachedWhatsAppTemplates');
+    return [];
+  }
+};
+
+// Only APPROVED templates are usable for scheduling — Meta rejects sends
+// using PENDING/REJECTED template names.
+export const getCachedApprovedWhatsAppTemplates = () => {
+  try {
+    const db = getDB();
+    const result = db.execute(
+      "SELECT * FROM whatsapp_templates_cache WHERE status = 'APPROVED' ORDER BY name ASC;"
+    );
+    return result.rows?._array || [];
+  } catch (error) {
+    handleError(error, 'getCachedApprovedWhatsAppTemplates');
     return [];
   }
 };

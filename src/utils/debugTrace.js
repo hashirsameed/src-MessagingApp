@@ -40,6 +40,22 @@ export const debugTraceError = (step, error, fields = {}) => {
   );
 };
 
+// Same shape as debugTraceError, but console.log instead of console.error —
+// for conditions that are expected and already handled gracefully by the
+// caller (no internet, request timeout, etc). console.error triggers React
+// Native's LogBox red overlay even when the app itself recovers fine, which
+// makes a normal "no internet" moment look like a crash. Use this instead
+// for anything the UI already shows a friendly, retryable message for.
+export const debugTraceRecoverable = (step, error, fields = {}) => {
+  if (!__DEV__) return;
+  console.log(
+    `${TRACE_PREFIX} step=${step} ${formatFields({
+      ...fields,
+      errorMessage: error?.message ?? String(error),
+    })}`,
+  );
+};
+
 /**
  * Logs a database state transition for queue/alarm tables.
  * oldState/newState should be status strings, e.g. PENDING → PROCESSING.

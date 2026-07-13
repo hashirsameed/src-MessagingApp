@@ -34,6 +34,17 @@ export const getDB = () => {
       db.execute(`ALTER TABLE templates ADD COLUMN platform_id TEXT;`);
     } catch (_) {}
 
+    // ── WhatsApp scheduling linkage — a WhatsApp-platform template row
+    // doesn't send its own `body` as freeform text (Meta rejects that
+    // outside a live 24h session); it points at one specific APPROVED Meta
+    // template by name+language instead. NULL for every non-WhatsApp row.
+    try {
+      db.execute(`ALTER TABLE templates ADD COLUMN meta_template_name TEXT;`);
+    } catch (_) {}
+    try {
+      db.execute(`ALTER TABLE templates ADD COLUMN meta_template_language TEXT;`);
+    } catch (_) {}
+
     try {
       db.execute(`
         UPDATE templates

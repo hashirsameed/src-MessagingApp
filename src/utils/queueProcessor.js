@@ -30,7 +30,7 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // (local_text reads smsPermissionGranted, managed_remote reads waConfigured),
 // so this function stays platform-agnostic. Result vocabulary unchanged:
 // 'sent' | 'opened' | 'failed_<REASON>'.
-const dispatchItem = async (platform, contact, message, smsPermissionGranted, waConfigured, traceContext = {}) => {
+const dispatchItem = async (platform, contact, message, smsPermissionGranted, waConfigured, traceContext = {}, template = null) => {
   debugTrace('DispatchItemStart', {
     ...traceContext,
     platformId: platform.id,
@@ -40,7 +40,7 @@ const dispatchItem = async (platform, contact, message, smsPermissionGranted, wa
   });
 
   const adapter = getAdapter(platform.platform_type ?? 'local_text');
-  return adapter.dispatch(platform, contact, message, { smsPermissionGranted, waConfigured, traceContext });
+  return adapter.dispatch(platform, contact, message, { smsPermissionGranted, waConfigured, traceContext, template });
 };
 
 // ---------------------------------------------------------------------------
@@ -189,7 +189,7 @@ export const processQueue = async (onProgress, parentTraceId = null) => {
 
         debugTrace('DispatchItemBefore', { ...traceContext, platformId: platform.id });
         const result = await dispatchItem(
-          platform, contact, message, smsPermissionGranted, waConfigured, traceContext,
+          platform, contact, message, smsPermissionGranted, waConfigured, traceContext, template,
         );
         debugTrace('DispatchItemAfter', { ...traceContext, result });
 

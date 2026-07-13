@@ -15,6 +15,7 @@ import QueueScreen from './src/screens/QueueScreen';
 import SettingsScreen from './src/screens/SettingsScreen';
 import WhatsAppConfigScreen from './src/screens/WhatsAppConfigScreen';
 import WhatsAppTemplatesScreen from './src/screens/WhatsAppTemplatesScreen';
+import DevTestScreen from './src/screens/DevTestScreen';
 
 import {
   registerBackgroundScheduler,
@@ -231,6 +232,14 @@ export default function App() {
           component={WhatsAppTemplatesScreen}
           options={{ title: 'Message Templates' }}
         />
+
+        {__DEV__ && (
+          <Stack.Screen
+            name="DevTestLab"
+            component={DevTestScreen}
+            options={{ title: 'Testing Lab' }}
+          />
+        )}
       </Stack.Navigator>
     </NavigationContainer>
   );

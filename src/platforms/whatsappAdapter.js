@@ -9,12 +9,15 @@ const formatPhone = (phone) => {
 
 /**
  * dispatch — handles platform_type = 'managed_remote' (WhatsApp / Meta Cloud API).
- * ctx = { waConfigured, traceContext }
- * Same result vocabulary as localTextAdapter: 'sent' | 'failed_<REASON>'.
- * All real send logic still lives in whatsappService.js — untouched.
+ * ctx = { waConfigured, traceContext, template }
+ * `template.meta_template_name`/`meta_template_language` (set when the
+ * schedule was created — see CreateTemplateScreen) tell sendWhatsAppMessage
+ * which specific APPROVED Meta template to use; contact.name fills its
+ * single {{1}} parameter. Same result vocabulary as localTextAdapter:
+ * 'sent' | 'failed_<REASON>'.
  */
 export const dispatch = async (platform, contact, message, ctx = {}) => {
-  const { waConfigured = false, traceContext = {} } = ctx;
+  const { waConfigured = false, traceContext = {}, template = null } = ctx;
 
   if (!waConfigured) {
     debugTrace('DispatchItemExit', {
@@ -26,7 +29,12 @@ export const dispatch = async (platform, contact, message, ctx = {}) => {
 
   const phone = formatPhone(contact.phone_number ?? '');
   debugTrace('WhatsAppRequestBefore', { ...traceContext, contactId: contact.id, phone });
-  const result = await sendWhatsAppMessage(phone, message, traceContext);
+  const result = await sendWhatsAppMessage(
+    phone, message, traceContext,
+    template?.meta_template_name ?? null,
+    template?.meta_template_language ?? null,
+    contact.name ?? null,
+  );
   debugTrace('WhatsAppRequestAfter', {
     ...traceContext, contactId: contact.id, success: result.success, error: result.error ?? '',
   });
