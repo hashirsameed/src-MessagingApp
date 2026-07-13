@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -10,6 +10,8 @@ import {
   RefreshControl,
   SafeAreaView,
   Platform,
+  Animated,
+  Dimensions,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import {
@@ -23,6 +25,7 @@ import { processQueue } from '../utils/queueProcessor';
 import { formatDateTime12Hour } from '../utils/dateFormat';
 
 const TABS = ['PENDING', 'SENT', 'FAILED'];
+const SCREEN_WIDTH = Dimensions.get('window').width;
 
 const STATUS_META = {
   PENDING: { color: '#F59E0B', bg: '#FFFBEB', label: 'Pending', icon: '⏳' },
@@ -51,6 +54,8 @@ export default function QueueScreen() {
   const [templateMap, setTemplateMap]   = useState({});
   const [refreshing, setRefreshing]     = useState(false);
   const [processing, setProcessing]     = useState(false);
+  const scrollX  = useRef(new Animated.Value(0)).current;
+  const pagerRef = useRef(null);
 
   const loadData = useCallback(() => {
     const items     = getAllQueue();
@@ -76,11 +81,20 @@ export default function QueueScreen() {
     setTimeout(() => setRefreshing(false), 500);
   }, [loadData]);
 
-  const filteredItems = allItems.filter((i) => i.status === activeTab);
   const pendingCount  = allItems.filter((i) => i.status === 'PENDING').length;
   const sentCount     = allItems.filter((i) => i.status === 'SENT').length;
   const failedCount   = allItems.filter((i) => i.status === 'FAILED').length;
   const tabCount      = { PENDING: pendingCount, SENT: sentCount, FAILED: failedCount };
+
+  const goToTab = (index) => {
+    setActiveTab(TABS[index]);
+    pagerRef.current?.scrollTo({ x: index * SCREEN_WIDTH, animated: true });
+  };
+
+  const handleMomentumEnd = (e) => {
+    const index = Math.round(e.nativeEvent.contentOffset.x / SCREEN_WIDTH);
+    setActiveTab(TABS[index] ?? TABS[0]);
+  };
 
   const handleRetry = (item) => {
     Alert.alert(
@@ -212,16 +226,16 @@ export default function QueueScreen() {
     );
   };
 
-  const renderEmpty = () => (
+  const renderEmpty = (status) => (
     <View style={styles.emptyContainer}>
       <Text style={styles.emptyIcon}>
-        {activeTab === 'PENDING' ? '📭' : activeTab === 'SENT' ? '📬' : '🚫'}
+        {status === 'PENDING' ? '📭' : status === 'SENT' ? '📬' : '🚫'}
       </Text>
-      <Text style={styles.emptyTitle}>No {STATUS_META[activeTab].label} Messages</Text>
+      <Text style={styles.emptyTitle}>No {STATUS_META[status].label} Messages</Text>
       <Text style={styles.emptySubtitle}>
-        {activeTab === 'PENDING'
+        {status === 'PENDING'
           ? 'Messages will appear here and send automatically.'
-          : activeTab === 'SENT'
+          : status === 'SENT'
           ? 'Successfully sent messages will appear here.'
           : 'Failed deliveries will be listed here with their reasons.'}
       </Text>
@@ -238,16 +252,31 @@ export default function QueueScreen() {
         </View>
       )}
 
-      {/* Tabs */}
+      {/* Tabs — sliding indicator tracks the swipe in real time; tap jumps straight there */}
       <View style={styles.tabBar}>
-        {TABS.map((tab) => {
+        <Animated.View
+          style={[
+            styles.tabIndicator,
+            {
+              backgroundColor: STATUS_META[activeTab].color,
+              transform: [{
+                translateX: scrollX.interpolate({
+                  inputRange: [0, SCREEN_WIDTH, SCREEN_WIDTH * 2],
+                  outputRange: [0, SCREEN_WIDTH / 3, (SCREEN_WIDTH / 3) * 2],
+                  extrapolate: 'clamp',
+                }),
+              }],
+            },
+          ]}
+        />
+        {TABS.map((tab, index) => {
           const meta     = STATUS_META[tab];
           const isActive = activeTab === tab;
           return (
             <TouchableOpacity
               key={tab}
-              style={[styles.tab, isActive && { borderBottomColor: meta.color, borderBottomWidth: 2.5 }]}
-              onPress={() => setActiveTab(tab)}
+              style={styles.tab}
+              onPress={() => goToTab(index)}
               activeOpacity={0.7}>
               <Text style={[styles.tabLabel, isActive && { color: meta.color, fontWeight: '700' }]}>
                 {meta.label}
@@ -262,19 +291,39 @@ export default function QueueScreen() {
         })}
       </View>
 
-      {/* List */}
-      <FlatList
-        data={filteredItems}
-        keyExtractor={(item) => item.id}
-        renderItem={renderItem}
-        ListEmptyComponent={renderEmpty}
-        contentContainerStyle={
-          filteredItems.length === 0 ? styles.emptyFlex : styles.listContent
-        }
-        refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#1A1A2E" />
-        }
-      />
+      {/* Pages — swipe between PENDING / SENT / FAILED, each with its own list */}
+      <Animated.ScrollView
+        ref={pagerRef}
+        horizontal
+        pagingEnabled
+        showsHorizontalScrollIndicator={false}
+        onScroll={Animated.event(
+          [{ nativeEvent: { contentOffset: { x: scrollX } } }],
+          { useNativeDriver: false },
+        )}
+        scrollEventThrottle={16}
+        onMomentumScrollEnd={handleMomentumEnd}
+        style={styles.pager}>
+        {TABS.map((tab) => {
+          const items = allItems.filter((i) => i.status === tab);
+          return (
+            <View key={tab} style={styles.page}>
+              <FlatList
+                data={items}
+                keyExtractor={(item) => item.id}
+                renderItem={renderItem}
+                ListEmptyComponent={renderEmpty(tab)}
+                contentContainerStyle={
+                  items.length === 0 ? styles.emptyFlex : styles.listContent
+                }
+                refreshControl={
+                  <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#1A1A2E" />
+                }
+              />
+            </View>
+          );
+        })}
+      </Animated.ScrollView>
     </SafeAreaView>
   );
 }
@@ -294,11 +343,15 @@ const styles = StyleSheet.create({
   },
   processingText: { fontSize: 13, fontWeight: '600', color: '#D97706' },
 
-  tabBar:       { flexDirection: 'row', backgroundColor: '#fff', borderBottomWidth: 1, borderBottomColor: '#F0F0F0' },
+  tabBar:       { flexDirection: 'row', backgroundColor: '#fff', borderBottomWidth: 1, borderBottomColor: '#F0F0F0', position: 'relative' },
+  tabIndicator: { position: 'absolute', bottom: 0, left: 0, height: 2.5, width: SCREEN_WIDTH / 3 },
   tab:          { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 14, gap: 6 },
   tabLabel:     { fontSize: 13, fontWeight: '600', color: '#BDBDBD' },
   tabBadge:     { borderRadius: 10, minWidth: 18, height: 18, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 5 },
   tabBadgeText: { fontSize: 10, fontWeight: '700', color: '#fff' },
+
+  pager: { flex: 1 },
+  page:  { width: SCREEN_WIDTH, flex: 1 },
 
   listContent: { padding: 16, gap: 12 },
   emptyFlex:   { flex: 1 },

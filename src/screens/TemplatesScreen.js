@@ -1,7 +1,7 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useRef } from 'react';
 import {
   View, Text, FlatList, TouchableOpacity, Switch,
-  StyleSheet, StatusBar, Platform, ScrollView,
+  StyleSheet, StatusBar, Platform, ScrollView, Animated, Dimensions,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { getAllTemplates, deleteTemplate, toggleTemplateActive } from '../database/templateDB';
@@ -15,12 +15,18 @@ import { handleError, showError, showConfirm, ErrorMessages } from '../utils/err
 import { InlineLoader } from '../components/LoadingSpinner';
 import WhatsAppTemplatesScreen from './WhatsAppTemplatesScreen';
 
+const SCREEN_WIDTH = Dimensions.get('window').width;
+const WA_PAGES = ['Scheduled', 'Approved Templates'];
+
 export default function TemplatesScreen({ navigation }) {
   const [platforms, setPlatforms]   = useState([]);
   const [activeTab, setActiveTab]   = useState('sms');
   const [templates, setTemplates]   = useState([]);
   const [templateCounts, setTemplateCounts] = useState({});
   const [loading, setLoading]       = useState(true);
+  const [waPageIndex, setWaPageIndex] = useState(0);
+  const waScrollX = useRef(new Animated.Value(0)).current;
+  const waPagerRef = useRef(null);
 
   // Refreshes the WhatsApp template cache directly, instead of waiting for
   // WhatsAppTemplatesScreen to have been opened at least once. Safe to call
@@ -136,6 +142,16 @@ export default function TemplatesScreen({ navigation }) {
     );
   };
 
+  const goToWaPage = (index) => {
+    setWaPageIndex(index);
+    waPagerRef.current?.scrollTo({ x: index * SCREEN_WIDTH, animated: true });
+  };
+
+  const handleWaMomentumEnd = (e) => {
+    const index = Math.round(e.nativeEvent.contentOffset.x / SCREEN_WIDTH);
+    setWaPageIndex(index);
+  };
+
   const renderItem = ({ item }) => {
     const active     = item.is_active === 1;
     const days       = item.days_before ?? 1;
@@ -220,21 +236,89 @@ export default function TemplatesScreen({ navigation }) {
       {loading ? (
         <InlineLoader message="Loading templates..." />
       ) : isManagedRemote ? (
-        <>
-          {/* WhatsAppTemplatesScreen's own "+ New Template" button creates a
-              new Meta-approved template (category/language/approval flow).
-              This is a separate action: schedule a reminder using a template
-              that's already approved (days_before/send_time), same as the
-              SMS/Email flow — so it needs its own entry point. */}
-          <TouchableOpacity
-            style={styles.scheduleWaBtn}
-            onPress={() => navigation.navigate('CreateTemplate', { presetPlatformId: 'whatsapp' })}
-            activeOpacity={0.8}>
-            <Text style={styles.scheduleWaBtnText}>🗓 Schedule a Reminder with an Approved Template</Text>
-          </TouchableOpacity>
-          {/* WhatsApp (Meta API) — untouched, existing screen embedded as-is. */}
-          <WhatsAppTemplatesScreen />
-        </>
+        <View style={styles.waWrap}>
+          {/* Segmented sub-nav — two distinct pages, swipe or tap between
+              them. Kept visually separate from the platform pill bar above
+              so it reads as "page within a page", not another row of tabs. */}
+          <View style={styles.waSegmentWrap}>
+            <View style={styles.waSegmentTrack}>
+              <Animated.View
+                style={[
+                  styles.waSegmentIndicator,
+                  {
+                    transform: [{
+                      translateX: waScrollX.interpolate({
+                        inputRange: [0, SCREEN_WIDTH],
+                        outputRange: [0, (SCREEN_WIDTH - 32) / 2],
+                        extrapolate: 'clamp',
+                      }),
+                    }],
+                  },
+                ]}
+              />
+              {WA_PAGES.map((label, index) => (
+                <TouchableOpacity
+                  key={label}
+                  style={styles.waSegmentBtn}
+                  activeOpacity={0.75}
+                  onPress={() => goToWaPage(index)}>
+                  <Text style={[
+                    styles.waSegmentText,
+                    waPageIndex === index && styles.waSegmentTextActive,
+                  ]}>
+                    {label}{label === 'Scheduled' && tabTemplates.length > 0 ? `  ·  ${tabTemplates.length}` : ''}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+
+          <Animated.ScrollView
+            ref={waPagerRef}
+            horizontal
+            pagingEnabled
+            showsHorizontalScrollIndicator={false}
+            onScroll={Animated.event(
+              [{ nativeEvent: { contentOffset: { x: waScrollX } } }],
+              { useNativeDriver: false },
+            )}
+            scrollEventThrottle={16}
+            onMomentumScrollEnd={handleWaMomentumEnd}
+            style={styles.waPager}>
+
+            {/* Page 1 — Scheduled Reminders: local `templates` rows with
+                platform_id 'whatsapp', each pointing at an approved Meta
+                template (days_before/send_time, same shape as SMS/Email). */}
+            <View style={styles.waPage}>
+              <FlatList
+                data={tabTemplates}
+                keyExtractor={(item) => item.id}
+                renderItem={renderItem}
+                contentContainerStyle={{ padding: 16, paddingBottom: 140 }}
+                ListEmptyComponent={
+                  <View style={styles.emptyContainer}>
+                    <Text style={styles.emptyIcon}>🗓</Text>
+                    <Text style={styles.emptyTitle}>No Reminders Scheduled</Text>
+                    <Text style={styles.emptySubtitle}>
+                      Schedule a reminder that sends an approved WhatsApp template automatically.
+                    </Text>
+                  </View>
+                }
+              />
+              <TouchableOpacity
+                style={styles.fab}
+                onPress={() => navigation.navigate('CreateTemplate', { presetPlatformId: 'whatsapp' })}>
+                <Text style={styles.fabText}>+ Schedule Reminder</Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* Page 2 — Approved Templates: WhatsAppTemplatesScreen's own
+                Meta Cloud API template manager, untouched, embedded as-is. */}
+            <View style={styles.waPage}>
+              <WhatsAppTemplatesScreen />
+            </View>
+          </Animated.ScrollView>
+        </View>
       ) : (
         <>
           <FlatList
@@ -289,12 +373,24 @@ const styles = StyleSheet.create({
   tabBadgeText:       { fontSize: 10, fontWeight: '700', color: '#1A1A2E' },
   tabBadgeTextActive: { color: '#fff' },
 
-  scheduleWaBtn: {
-    marginHorizontal: 16, marginTop: 12, marginBottom: 4,
-    backgroundColor: '#EEF2FF', borderRadius: 12, paddingVertical: 12,
-    alignItems: 'center', borderWidth: 1, borderColor: '#DDE3FF',
+  waWrap:   { flex: 1 },
+
+  waSegmentWrap:  { paddingHorizontal: 16, paddingBottom: 12 },
+  waSegmentTrack: {
+    flexDirection: 'row', backgroundColor: '#EDEFF2', borderRadius: 12,
+    height: 40, padding: 3, position: 'relative',
   },
-  scheduleWaBtnText: { color: '#3730A3', fontSize: 13, fontWeight: '700' },
+  waSegmentIndicator: {
+    position: 'absolute', top: 3, left: 3, bottom: 3,
+    width: '50%', backgroundColor: '#fff', borderRadius: 9,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.08, shadowRadius: 3, elevation: 2,
+  },
+  waSegmentBtn:        { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  waSegmentText:       { fontSize: 13, fontWeight: '600', color: '#8B8FA3' },
+  waSegmentTextActive: { color: '#1A1A2E', fontWeight: '700' },
+
+  waPager: { flex: 1 },
+  waPage:  { width: SCREEN_WIDTH, flex: 1 },
 
   card:           { backgroundColor: '#fff', borderRadius: 16, marginBottom: 12, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.06, shadowRadius: 8, elevation: 3 },
   cardInactive:   { opacity: 0.55 },
