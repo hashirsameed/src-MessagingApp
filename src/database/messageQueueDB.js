@@ -269,6 +269,12 @@ export const claimPendingQueue = (callerId = null) => {
     const ids = pendingBefore.map((r) => r.id);
     const placeholders = ids.map(() => '?').join(',');
 
+    // Unique per call — guarantees this claim can only ever pick up rows
+    // this exact call itself flipped, even if another concurrent claim
+    // (native alarm vs safety-net worker, different JS contexts) runs its
+    // own SELECT-UPDATE-SELECT sequence interleaved with this one.
+    const claimToken = `${callerId ?? 'unknown'}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
     debugTraceDbWrite('ClaimPendingQueueUpdate', {
       table: 'message_queue',
       pk: ids.join(','),
@@ -276,14 +282,25 @@ export const claimPendingQueue = (callerId = null) => {
       newState: QUEUE_STATUS.PROCESSING,
       rowCount: ids.length,
       claimedBy: callerId,
+      claimToken,
     });
-    db.execute(`UPDATE message_queue SET status = 'PROCESSING' WHERE id IN (${placeholders});`, ids);
+    // Critical: status = 'PENDING' is re-checked HERE, at write time — not
+    // just at the read above. If another claim already flipped one of
+    // these ids away from PENDING between our SELECT and this UPDATE, this
+    // WHERE clause skips it, so we can never steal a row someone else
+    // already has.
+    db.execute(
+      `UPDATE message_queue SET status = 'PROCESSING', claimed_by = ?
+       WHERE id IN (${placeholders}) AND status = 'PENDING';`,
+      [claimToken, ...ids],
+    );
 
-    // Only return the rows THIS run just claimed (by id) — not every row
-    // that happens to have status='PROCESSING' at this instant.
+    // Only return rows THIS call's claim token actually landed on — never
+    // "everything currently PROCESSING", which could include another
+    // run's in-flight rows.
     const result = db.execute(
-      `SELECT * FROM message_queue WHERE id IN (${placeholders}) ORDER BY created_at ASC;`,
-      ids,
+      `SELECT * FROM message_queue WHERE claimed_by = ? AND status = 'PROCESSING' ORDER BY created_at ASC;`,
+      [claimToken],
     );
     const claimed = result.rows?._array || [];
     debugTraceDuration('ClaimPendingQueueEnd', startTime, {

@@ -1,4 +1,4 @@
-import { Platform } from 'react-native';
+import { Platform, NativeModules } from 'react-native';
 import {
   claimPendingQueue, markAsSent, markAsFailed, revertToPending,
   countSmsSentInLastHour,
@@ -13,6 +13,24 @@ import { debugTrace, debugTraceError, debugTraceDuration, generateTraceId } from
 import { getAdapter } from '../platforms/registry';
 import { requestSmsPermission } from '../platforms/localTextAdapter'; // also self-registers 'local_text'
 import { isConfigured as hasWhatsAppCredentials } from '../platforms/whatsappAdapter'; // also self-registers 'managed_remote'
+
+const { AlarmModule } = NativeModules;
+
+// scheduleAlarm/cancelAlarm (alarmScheduler.js) already call this after
+// their own SQLite writes land — same reasoning applies here: a send
+// changes which contact/template is "next" (this one is done, the next
+// pending one becomes the new "next"), so the persistent notification and
+// home-screen widget need the same nudge after a queue run actually
+// changes state. Missing this call was why "Next: X at Y" kept showing a
+// stale entry after X's message had already gone out.
+const refreshReminderSurfacesIfChanged = (summary) => {
+  if (Platform.OS !== 'android') return;
+  if (!AlarmModule?.refreshReminderSurfaces) return;
+  if (summary.sent === 0 && summary.opened === 0 && summary.failed === 0) return;
+  AlarmModule.refreshReminderSurfaces().catch((error) => {
+    handleError(error, 'processQueue.refreshReminderSurfaces');
+  });
+};
 
 export const FIXED_PLATFORMS = [
   { id: 'sms',      name: 'SMS',      url_scheme: 'sms:{phone}?body={message}', platform_type: 'local_text' },
@@ -234,11 +252,13 @@ export const processQueue = async (onProgress, parentTraceId = null) => {
     }
 
     debugTraceDuration('ProcessQueueEnd', startTime, { traceId, outcome: 'completed', ...summary });
+    refreshReminderSurfacesIfChanged(summary);
     return summary;
   } catch (error) {
     debugTraceError('ProcessQueueCatch', error, { function: 'processQueue', traceId });
     handleError(error, 'processQueue');
     debugTraceDuration('ProcessQueueEnd', startTime, { traceId, outcome: 'error', ...summary });
+    refreshReminderSurfacesIfChanged(summary);
     return summary;
   }
 };

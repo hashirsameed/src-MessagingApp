@@ -183,6 +183,19 @@ export const getDB = () => {
       );
     `);
 
+    // ── claim token — fixes a race that caused double-sends ────────────────
+    // Native AlarmManager and the 15-min WorkManager safety net can both
+    // fire close together, each running its own processQueue(). The old
+    // claimPendingQueue() did SELECT-pending then UPDATE-by-id as two
+    // separate steps, so if both runs' SELECTs landed before either UPDATE,
+    // both would claim and send the SAME row. The fix conditions the UPDATE
+    // on status='PENDING' at write time (not read time) and tags claimed
+    // rows with a unique token, so a second concurrent claim can never grab
+    // rows the first one already took.
+    try {
+      db.execute(`ALTER TABLE message_queue ADD COLUMN claimed_by TEXT;`);
+    } catch (_) {}
+
     // ── scheduled_alarms — Layer 2 (Scheduler) source of truth ─────────────
     // AlarmManager is just the executor; this table is what the app
     // actually trusts when deciding whether an alarm is still valid,

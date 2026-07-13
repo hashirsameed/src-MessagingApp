@@ -37,11 +37,7 @@ const NEW_FORMAT_MARKER = 'whatsapp_creds';
 // MUST be set to false before shipping to production — otherwise every
 // WhatsApp send will silently go out as "hello_world" instead of the
 // user's actual personalized message.
-//
-// TODO: flip to false once the real template(s) are approved in Meta
-// Business Manager, or wire this to an env var / build config instead of
-// a hardcoded constant.
-const DEV_MODE = true;
+const DEV_MODE = false;
 
 const DEV_TEMPLATE_NAME = 'hello_world';
 const DEV_TEMPLATE_LANGUAGE = 'en_US';
