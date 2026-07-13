@@ -52,6 +52,12 @@ export const upsertScheduledAlarm = (contactId, templateId, requestCode, trigger
       triggerAtISO,
     });
 
+    // status only resets to 'scheduled' when this is genuinely a new cycle
+    // (trigger_at actually changed). If trigger_at is identical to what's
+    // already stored and the row is 'fired'/'firing', a reschedule pass
+    // (template edit/create, contact add) must NOT resurrect an alarm that
+    // already sent — that was silently reviving already-sent pairs and
+    // causing the duplicate-send-minutes-later bug.
     db.execute(
       `
       INSERT INTO scheduled_alarms (id, contact_id, template_id, request_code, trigger_at, status, updated_at)
@@ -59,7 +65,12 @@ export const upsertScheduledAlarm = (contactId, templateId, requestCode, trigger
       ON CONFLICT(id) DO UPDATE SET
         request_code = excluded.request_code,
         trigger_at   = excluded.trigger_at,
-        status       = 'scheduled',
+        status       = CASE
+                          WHEN status IN ('fired', 'firing')
+                               AND trigger_at = excluded.trigger_at
+                          THEN status
+                          ELSE 'scheduled'
+                        END,
         updated_at   = datetime('now');
       `,
       [id, contactId, templateId, requestCode, triggerAtISO],

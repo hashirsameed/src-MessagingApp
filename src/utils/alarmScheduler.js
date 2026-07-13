@@ -6,6 +6,7 @@ import {
   cancelAllScheduledAlarmsForContact,
   cancelAllScheduledAlarmsForTemplate,
   getAllActiveScheduledAlarms,
+  getScheduledAlarm,
 } from '../database/scheduledAlarmDB';
 import { debugTrace, debugTraceError, debugTraceDuration, generateTraceId } from './debugTrace';
 import { toPakistanParts, pakistanPartsToUtcMs } from './pakistanTime';
@@ -212,6 +213,20 @@ export const scheduleAlarm = async (contactId, templateId, timestampMs) => {
     return 'FAILED_NATIVE_MODULE_UNAVAILABLE';
   }
   try {
+    const triggerAtISO = new Date(timestampMs).toISOString().replace(/\.\d{3}Z$/, 'Z');
+    const existing = getScheduledAlarm(contactId, templateId);
+    if (
+      existing &&
+      (existing.status === 'fired' || existing.status === 'firing') &&
+      existing.trigger_at === triggerAtISO
+    ) {
+      // Same cycle already fired (or is mid-fire) — a reschedule pass
+      // (template edit/create, contact add) must not re-arm a native alarm
+      // for a pair that already sent. Previously this always re-armed,
+      // which caused the duplicate-send-minutes-later bug.
+      return 'SKIPPED_ALREADY_FIRED';
+    }
+
     const requestCode = getRequestCode(contactId, templateId);
     const result = await AlarmModule.scheduleExactAlarm(
       requestCode,
@@ -221,7 +236,6 @@ export const scheduleAlarm = async (contactId, templateId, timestampMs) => {
     );
 
     if (result === 'SCHEDULED') {
-      const triggerAtISO = new Date(timestampMs).toISOString().replace(/\.\d{3}Z$/, 'Z');
       upsertScheduledAlarm(contactId, templateId, requestCode, triggerAtISO);
       // Refresh only now — after the new row is actually written — so the
       // notification/widget "next alarm" query sees it. Refreshing earlier
