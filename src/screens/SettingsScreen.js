@@ -5,7 +5,7 @@ import {
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { getDefaultPlatform, setDefaultPlatform } from '../database/settingsDB';
-import { getAllPlatforms, togglePlatformEnabled } from '../database/platformDB';
+import { getAllPlatforms, togglePlatformEnabled, seedDefaultPlatforms } from '../database/platformDB';
 import { getAllRateLimits, setRateLimit, clearRateLimit } from '../database/rateLimitDB';
 import { handleError, showError, showSuccess, ErrorMessages } from '../utils/errorHandler';
 import { runExpiryCheck } from '../utils/scheduler';
@@ -29,6 +29,11 @@ export default function SettingsScreen({ navigation }) {
 
   const loadSettings = async () => {
     try {
+      // Email/Gmail rows only get inserted by seedDefaultPlatforms() — this
+      // used to run only from TemplatesScreen, so opening Settings before
+      // ever visiting Templates showed just SMS+WhatsApp (seeded at DB
+      // init) with Email/Gmail missing until Templates got visited once.
+      seedDefaultPlatforms();
       setDefaultPlatformState(getDefaultPlatform());
       const savedLimits = getAllRateLimits();
       const drafts = {};

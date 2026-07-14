@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, Switch,
-  StyleSheet, KeyboardAvoidingView, Platform, ScrollView, StatusBar,
+  StyleSheet, KeyboardAvoidingView, Platform, ScrollView, StatusBar, Keyboard,
 } from 'react-native';
 import { updateTemplate } from '../database/templateDB';
 import { getAllContacts } from '../database/contactDB';
@@ -52,6 +52,7 @@ export default function EditTemplateScreen({ navigation, route }) {
     const newErrors = {};
     if (!titleResult.valid) newErrors.title = titleResult.message;
     if (!timeResult.valid)  newErrors.time  = timeResult.message;
+    else if (sendTime.trim() && !sendMeridiem) newErrors.time = 'Select AM or PM.';
 
     if (isWhatsApp) {
       if (!metaTemplateName) newErrors.metaTemplate = 'Pick an approved WhatsApp template.';
@@ -137,7 +138,10 @@ export default function EditTemplateScreen({ navigation, route }) {
       style={{ flex: 1 }}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
       <StatusBar backgroundColor="#fff" barStyle="dark-content" />
-      <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
+      <ScrollView
+        style={styles.container}
+        showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled">
 
         <View style={styles.header}>
           <Text style={styles.headerTitle}>Edit Template</Text>
@@ -197,7 +201,7 @@ export default function EditTemplateScreen({ navigation, route }) {
               keyboardType="numbers-and-punctuation"
               maxLength={5}
             />
-            <View style={styles.meridiemGroup}>
+            <View style={[styles.meridiemGroup, (errors.time && sendTime.trim() && !sendMeridiem) && styles.meridiemGroupError]}>
               {['AM', 'PM'].map((option) => (
                 <TouchableOpacity
                   key={option}
@@ -208,6 +212,7 @@ export default function EditTemplateScreen({ navigation, route }) {
                   onPress={() => {
                     setSendMeridiem(option);
                     setErrors(e => ({ ...e, time: '' }));
+                    Keyboard.dismiss();
                   }}
                   activeOpacity={0.8}>
                   <Text style={[
@@ -359,6 +364,7 @@ const styles = StyleSheet.create({
   timeInputRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   timeInput: { flex: 1 },
   meridiemGroup: { flexDirection: 'row', gap: 8 },
+  meridiemGroupError: { borderWidth: 1.5, borderColor: '#D32F2F', borderRadius: 12, padding: 3 },
   meridiemBtn: {
     minWidth: 52,
     paddingHorizontal: 12,

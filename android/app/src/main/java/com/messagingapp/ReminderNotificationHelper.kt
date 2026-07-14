@@ -62,10 +62,15 @@ object ReminderNotificationHelper {
     fun buildNotification(context: Context): Notification {
         ensureChannel(context)
         val next = NextAlarmRepository.queryNextAlarm(context)
+        val pendingCount = NextAlarmRepository.queryPendingCount(context)
+        val pendingSuffix = if (pendingCount > 0) "  •  $pendingCount pending" else ""
 
         val (title, body) = if (next != null) {
             "Reminder engine active" to
-                "Next: ${next.contactName} — ${next.templateTitle} at ${NextAlarmRepository.formatPakistanTime(next.triggerAtIso)}"
+                "Next: ${next.contactName} — ${next.templateTitle} at " +
+                "${NextAlarmRepository.formatPakistanTime(next.triggerAtIso)}$pendingSuffix"
+        } else if (pendingCount > 0) {
+            "Reminder engine active" to "$pendingCount message(s) waiting to send"
         } else {
             "Reminder engine active" to "No upcoming reminders scheduled"
         }

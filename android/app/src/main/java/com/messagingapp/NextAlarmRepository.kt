@@ -86,6 +86,37 @@ object NextAlarmRepository {
     }
 
     /**
+     * How many messages are sitting in message_queue with status='PENDING'
+     * right now — items whose native alarm already fired but got deferred
+     * (usually a rate limit) and are waiting for the next processQueue()
+     * run to retry them. queryNextAlarm() alone can't surface this: once an
+     * item's alarm has fired, there's no future scheduled_alarms row left
+     * for it, so the notification silently said nothing about the backlog.
+     * Returns 0 if the DB isn't reachable rather than throwing, since this
+     * is a "nice to have" count, not the primary notification content.
+     */
+    fun queryPendingCount(context: Context): Int {
+        val dbFile = resolveDbFile(context) ?: return 0
+        return try {
+            val db = SQLiteDatabase.openDatabase(
+                dbFile.absolutePath, null, SQLiteDatabase.OPEN_READONLY,
+            )
+            db.use {
+                val cursor = it.rawQuery(
+                    "SELECT COUNT(*) AS pending_count FROM message_queue WHERE status = 'PENDING';",
+                    null,
+                )
+                cursor.use { c ->
+                    if (c.moveToFirst()) c.getInt(c.getColumnIndexOrThrow("pending_count")) else 0
+                }
+            }
+        } catch (error: Exception) {
+            TraceLog.e("NextAlarmRepositoryPendingCountException", error, emptyMap())
+            0
+        }
+    }
+
+    /**
      * trigger_at is stored as a UTC ISO instant (e.g. "2026-07-10T09:00:00Z").
      * Displayed in Pakistan wall-clock time — fixed UTC+5, no DST — same
      * convention as src/utils/pakistanTime.js.
