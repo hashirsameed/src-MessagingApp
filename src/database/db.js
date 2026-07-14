@@ -65,6 +65,35 @@ export const getDB = () => {
       );
     `);
 
+    // ── created_at migration ──────────────────────────────────────────────
+    // Records when each contact actually entered the system. Used by
+    // alarmScheduler to tell "this template's exact time passed before the
+    // contact existed" (must be skipped) apart from "this template's time
+    // passed while the contact already existed but the device was asleep/
+    // closed" (must still catch up). Without this column both cases look
+    // identical — both are simply "in the past" — which is the root cause
+    // of a same-day-added contact instantly firing an earlier template
+    // whose clock time has already gone by.
+    try {
+      db.execute(`ALTER TABLE contacts ADD COLUMN created_at TEXT;`);
+    } catch (_) {}
+
+    // Backfill existing rows to a far-past timestamp (NOT "now"). These
+    // contacts were already in the system before this column existed, so
+    // we must preserve their existing "any overdue template is still
+    // eligible" behavior instead of retroactively blocking their pending
+    // catch-up alarms.
+    try {
+      db.execute(`
+        UPDATE contacts
+        SET created_at = '1970-01-01T00:00:00Z'
+        WHERE created_at IS NULL;
+      `);
+    } catch (error) {
+      console.log('contacts.created_at backfill error:', error);
+    }
+    // ────────────────────────────────────────────────────────────────────
+
     // ── expiry_datetime migration (UTC ISO TEXT) ──────────────────────────
     try {
       db.execute(`ALTER TABLE contacts ADD COLUMN expiry_datetime TEXT;`);

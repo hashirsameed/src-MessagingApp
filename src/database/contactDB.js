@@ -33,10 +33,19 @@ export const insertContact = (contact) => {
     const db = getDB();
     const expiryUTC = toUTCISOString(contact.expiry_datetime);
     const legacyDate = toLegacyDateOnly(expiryUTC);
+    // created_at defaults to "now" (the moment the contact actually enters
+    // the system) unless the caller explicitly supplies one — e.g. a bulk
+    // import that wants to backdate it.
+    const createdAtUTC = toUTCISOString(contact.created_at ?? new Date());
     db.execute(
-      'INSERT INTO contacts (id, name, phone_number, expiry_date, expiry_datetime) VALUES (?, ?, ?, ?, ?);',
-      [contact.id, contact.name, contact.phone_number, legacyDate, expiryUTC]
+      'INSERT INTO contacts (id, name, phone_number, expiry_date, expiry_datetime, created_at) VALUES (?, ?, ?, ?, ?, ?);',
+      [contact.id, contact.name, contact.phone_number, legacyDate, expiryUTC, createdAtUTC]
     );
+    // Mutate the in-memory object too — callers such as AddContactScreen
+    // pass this same object straight into scheduleAlarmsForContact right
+    // after insertContact() returns, so it needs created_at set on it,
+    // not just in the DB row.
+    contact.created_at = createdAtUTC;
     return true;
   } catch (error) {
     handleError(error, 'insertContact');

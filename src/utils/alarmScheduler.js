@@ -190,9 +190,34 @@ export const computeTargetAlarmTimestamp = (contact, template) => {
   );
 };
 
+/**
+ * True when a template's exact target time had already gone by BEFORE the
+ * contact even existed in the system — e.g. Template A is fixed for 10:20,
+ * the contact is added at 10:25 with an expiry of 10:45. From the contact's
+ * point of view, that 10:20 slot never applied to them; it belongs to the
+ * period before they were added. Firing it "as a catch-up" the instant they
+ * join is the bug — it should simply be skipped, and the scheduler should
+ * wait for the next genuinely-future template (here, the 10:45 one).
+ *
+ * This is deliberately different from a template whose time passed while
+ * the contact already existed (e.g. the app was closed or the device was
+ * asleep) — that case is a real miss and should still catch up, which is
+ * why this only compares against contact.created_at, never against "now".
+ */
+export const wasAlarmTargetBeforeContactCreated = (contact, alarmMs) => {
+  if (alarmMs === null || !contact?.created_at) return false;
+  const createdAtMs = new Date(contact.created_at).getTime();
+  if (isNaN(createdAtMs)) return false;
+  return alarmMs < createdAtMs;
+};
+
 export const computeAlarmTimestamp = (contact, template) => {
   const alarmMs = computeTargetAlarmTimestamp(contact, template);
   if (alarmMs === null) return null;
+
+  // The slot was already gone before this contact existed — it never
+  // applied to them, so don't schedule (and definitely don't fire) it.
+  if (wasAlarmTargetBeforeContactCreated(contact, alarmMs)) return null;
 
   if (alarmMs <= Date.now()) {
     return Date.now() + IMMEDIATE_ALARM_DELAY_MS; // fire almost immediately
@@ -203,7 +228,9 @@ export const computeAlarmTimestamp = (contact, template) => {
 
 export const isTemplateAlarmDue = (contact, template, nowMs = Date.now()) => {
   const alarmMs = computeTargetAlarmTimestamp(contact, template);
-  return alarmMs !== null && alarmMs <= nowMs;
+  if (alarmMs === null) return false;
+  if (wasAlarmTargetBeforeContactCreated(contact, alarmMs)) return false;
+  return alarmMs <= nowMs;
 };
 
 export const scheduleAlarm = async (contactId, templateId, timestampMs) => {
