@@ -1,0 +1,100 @@
+import { getDB } from './db';
+import { handleError } from '../utils/errorHandler';
+
+/**
+ * Per-platform rate limiting — each platform (SMS, WhatsApp, Email,
+ * Gmail, custom) can have its own send limit over its own custom time
+ * window (e.g. "5 per hour", "20 per 30 minutes", "1 per 90 minutes").
+ * No row for a platform = unlimited, same as the old default behavior
+ * for every platform except SMS.
+ */
+
+export const getRateLimit = (platformId) => {
+  try {
+    const db = getDB();
+    const row = db.execute(
+      'SELECT limit_count, window_minutes FROM platform_rate_limits WHERE platform_id = ?;',
+      [platformId],
+    ).rows?._array?.[0];
+    if (!row) return null;
+    return { limitCount: row.limit_count, windowMinutes: row.window_minutes };
+  } catch (error) {
+    handleError(error, 'getRateLimit');
+    return null;
+  }
+};
+
+export const getAllRateLimits = () => {
+  try {
+    const db = getDB();
+    const rows = db.execute('SELECT * FROM platform_rate_limits;').rows?._array ?? [];
+    const map = {};
+    rows.forEach((r) => {
+      map[r.platform_id] = { limitCount: r.limit_count, windowMinutes: r.window_minutes };
+    });
+    return map;
+  } catch (error) {
+    handleError(error, 'getAllRateLimits');
+    return {};
+  }
+};
+
+/**
+ * @param {string} platformId
+ * @param {number} limitCount     Positive integer — max sends allowed per window.
+ * @param {number} windowMinutes  Positive integer — rolling window length in minutes
+ *                                 (e.g. 90 for "1 hour 30 minutes").
+ */
+export const setRateLimit = (platformId, limitCount, windowMinutes) => {
+  try {
+    const db = getDB();
+    db.execute(
+      `INSERT INTO platform_rate_limits (platform_id, limit_count, window_minutes)
+       VALUES (?, ?, ?)
+       ON CONFLICT(platform_id) DO UPDATE SET limit_count = excluded.limit_count, window_minutes = excluded.window_minutes;`,
+      [platformId, limitCount, windowMinutes],
+    );
+    return true;
+  } catch (error) {
+    handleError(error, 'setRateLimit');
+    return false;
+  }
+};
+
+// Removing the row = unlimited for that platform again.
+export const clearRateLimit = (platformId) => {
+  try {
+    const db = getDB();
+    db.execute('DELETE FROM platform_rate_limits WHERE platform_id = ?;', [platformId]);
+    return true;
+  } catch (error) {
+    handleError(error, 'clearRateLimit');
+    return false;
+  }
+};
+
+// How many messages this platform has actually sent within its own
+// rolling window (right now). Generic replacement for the old SMS-only
+// countSmsSentInLastHour() — same rolling-window approach, any platform,
+// any window length.
+export const countSentInWindow = (platformId, windowMinutes) => {
+  try {
+    const db = getDB();
+    // sent_at is stored as JS ISO ("...T...Z"), but datetime('now', ...)
+    // returns SQLite's own space-separated format. Comparing them as raw
+    // strings is broken — 'T' (0x54) sorts after ' ' (0x20), so any
+    // same-day ISO timestamp always compares as ">= " the cutoff no
+    // matter how old it actually is. datetime(sent_at) normalizes it to
+    // SQLite's format first, so the comparison is a real time comparison.
+    const result = db.execute(
+      `SELECT COUNT(*) as count FROM message_queue
+       WHERE platform_id = ? AND status = 'SENT'
+       AND datetime(sent_at) >= datetime('now', '-' || ? || ' minutes');`,
+      [platformId, windowMinutes],
+    );
+    return result.rows?._array?.[0]?.count ?? 0;
+  } catch (error) {
+    handleError(error, 'countSentInWindow');
+    return 0;
+  }
+};

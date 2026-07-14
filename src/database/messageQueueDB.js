@@ -77,7 +77,7 @@ export const addToQueueDetailed = (contactId, templateId, platformId, traceId = 
     const sentCheck = db.execute(
       `SELECT id FROM message_queue
        WHERE contact_id = ? AND template_id = ? AND status = 'SENT'
-       AND sent_at >= datetime('now', '-30 days');`,
+       AND datetime(sent_at) >= datetime('now', '-30 days');`,
       [contactId, templateId],
     );
     if (sentCheck.rows?._array?.length > 0) {
@@ -106,7 +106,7 @@ export const addToQueueDetailed = (contactId, templateId, platformId, traceId = 
     const recentFailCheck = db.execute(
       `SELECT id FROM message_queue
        WHERE contact_id = ? AND template_id = ? AND status = 'FAILED'
-       AND created_at >= datetime('now', '-24 hours');`,
+       AND datetime(created_at) >= datetime('now', '-24 hours');`,
       [contactId, templateId],
     );
     if (recentFailCheck.rows?._array?.length > 0) {
@@ -224,7 +224,7 @@ export const claimPendingQueue = (callerId = null) => {
     const staleRows = db.execute(
       `SELECT id, contact_id, template_id FROM message_queue
        WHERE status = 'PROCESSING'
-       AND created_at <= datetime('now', '-${STALE_PROCESSING_MINUTES} minutes');`,
+       AND datetime(created_at) <= datetime('now', '-${STALE_PROCESSING_MINUTES} minutes');`,
     ).rows?._array ?? [];
 
     if (staleRows.length > 0) {
@@ -248,7 +248,7 @@ export const claimPendingQueue = (callerId = null) => {
       db.execute(
         `UPDATE message_queue
          SET status = 'FAILED', error_reason = 'STUCK_PROCESSING_TIMEOUT', attempt_count = attempt_count + 1
-         WHERE status = 'PROCESSING' AND created_at <= datetime('now', '-${STALE_PROCESSING_MINUTES} minutes');`,
+         WHERE status = 'PROCESSING' AND datetime(created_at) <= datetime('now', '-${STALE_PROCESSING_MINUTES} minutes');`,
       );
     }
 
@@ -463,7 +463,7 @@ export const countSmsSentInLastHour = () => {
     const result = db.execute(
       `SELECT COUNT(*) as count FROM message_queue
        WHERE platform_id = 'sms' AND status = 'SENT'
-       AND sent_at >= datetime('now', '-60 minutes');`,
+       AND datetime(sent_at) >= datetime('now', '-60 minutes');`,
     );
     return result.rows?._array?.[0]?.count ?? 0;
   } catch (error) {

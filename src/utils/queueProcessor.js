@@ -1,12 +1,11 @@
 import { Platform, NativeModules } from 'react-native';
 import {
   claimPendingQueue, markAsSent, markAsFailed, revertToPending,
-  countSmsSentInLastHour,
 } from '../database/messageQueueDB';
 import { getAllContacts } from '../database/contactDB';
 import { getAllTemplates } from '../database/templateDB';
 import { getAllPlatforms } from '../database/platformDB';
-import { getSmsPerHourLimit } from '../database/settingsDB';
+import { getRateLimit, countSentInWindow } from '../database/rateLimitDB';
 import { getDaysUntilExpiry, personalizeMessage } from './templateMatcher';
 import { handleError } from './errorHandler';
 import { debugTrace, debugTraceError, debugTraceDuration, generateTraceId } from './debugTrace';
@@ -113,10 +112,28 @@ export const processQueue = async (onProgress, parentTraceId = null) => {
     const waConfigured = await hasWhatsAppCredentials();
     debugTrace('HasWhatsAppCredentialsAfter', { traceId, waConfigured });
 
-    const smsPerHourLimit = getSmsPerHourLimit();
-    let smsSentThisHour   = countSmsSentInLastHour();
+    // Per-platform rolling-window counters — every platform can have its
+    // own limit + window now, not just SMS. Rate limits are looked up
+    // once per platform (cached in rateLimits) since they don't change
+    // mid-run; sentInWindow tracks how many each platform has sent so far
+    // in this run, seeded from the DB's actual count in the last window.
+    const rateLimits = new Map(); // platformId -> { limitCount, windowMinutes } | null (unlimited)
+    const sentInWindow = new Map(); // platformId -> count
 
-    debugTrace('SmsRateLimitState', { traceId, smsSentThisHour, smsPerHourLimit });
+    const getPlatformRateLimit = (platformId) => {
+      if (!rateLimits.has(platformId)) {
+        rateLimits.set(platformId, getRateLimit(platformId));
+      }
+      return rateLimits.get(platformId);
+    };
+    const getSentInWindow = (platformId, windowMinutes) => {
+      if (!sentInWindow.has(platformId)) {
+        sentInWindow.set(platformId, countSentInWindow(platformId, windowMinutes));
+      }
+      return sentInWindow.get(platformId);
+    };
+
+    debugTrace('RateLimitState', { traceId, platforms: allPlatforms.map((p) => p.id).join(',') });
 
     for (let i = 0; i < claimed.length; i++) {
       const item = claimed[i];
@@ -146,14 +163,20 @@ export const processQueue = async (onProgress, parentTraceId = null) => {
         selectedPlatformId: platform?.id ?? '',
       });
 
-      if (platform?.id === 'sms' && smsSentThisHour >= smsPerHourLimit) {
-        debugTrace('ProcessQueueItemRateLimited', {
-          ...traceContext, exitReason: 'sms_hourly_limit_reached', smsSentThisHour, smsPerHourLimit,
-        });
-        revertToPending(item.id, traceId);
-        summary.rateLimited += 1;
-        debugTrace('ProcessQueueItemContinue', { ...traceContext, action: 'continue_rate_limited' });
-        continue;
+      const rateLimit = platform ? getPlatformRateLimit(platform.id) : null;
+      if (rateLimit) {
+        const currentSent = getSentInWindow(platform.id, rateLimit.windowMinutes);
+        if (currentSent >= rateLimit.limitCount) {
+          debugTrace('ProcessQueueItemRateLimited', {
+            ...traceContext, exitReason: 'platform_rate_limit_reached',
+            platformId: platform.id, currentSent,
+            limitCount: rateLimit.limitCount, windowMinutes: rateLimit.windowMinutes,
+          });
+          revertToPending(item.id, traceId);
+          summary.rateLimited += 1;
+          debugTrace('ProcessQueueItemContinue', { ...traceContext, action: 'continue_rate_limited' });
+          continue;
+        }
       }
 
       summary.processed += 1;
@@ -214,7 +237,9 @@ export const processQueue = async (onProgress, parentTraceId = null) => {
         if (result === 'sent') {
           markAsSent(item.id, traceId);
           summary.sent += 1;
-          if (isSmsAttempt) smsSentThisHour += 1;
+          if (rateLimit) {
+            sentInWindow.set(platform.id, getSentInWindow(platform.id, rateLimit.windowMinutes) + 1);
+          }
           debugTrace('ProcessQueueItemOutcome', { ...traceContext, outcome: 'sent' });
         } else if (result === 'opened') {
           markAsSent(item.id, traceId);

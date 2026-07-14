@@ -198,6 +198,32 @@ export const getDB = () => {
       );
     `);
 
+    // ── per-platform rate limits — configurable count + custom time window ─
+    // Replaces the old hardcoded "SMS per hour" setting. No row for a
+    // platform = unlimited (matches old behavior for every non-SMS
+    // platform, which was never throttled before this).
+    db.execute(`
+      CREATE TABLE IF NOT EXISTS platform_rate_limits (
+        platform_id TEXT NOT NULL PRIMARY KEY,
+        limit_count INTEGER NOT NULL,
+        window_minutes INTEGER NOT NULL
+      );
+    `);
+
+    // One-time carry-over: anyone who already set the old single
+    // "sms_per_hour_limit" setting keeps that exact config instead of
+    // silently reverting to a fresh default under the new system.
+    try {
+      const legacy = db.execute("SELECT value FROM settings WHERE key = 'sms_per_hour_limit';").rows?._array?.[0];
+      const existingSmsLimit = db.execute("SELECT 1 FROM platform_rate_limits WHERE platform_id = 'sms';").rows?._array?.[0];
+      if (legacy?.value && !existingSmsLimit) {
+        db.execute(
+          'INSERT INTO platform_rate_limits (platform_id, limit_count, window_minutes) VALUES (?, ?, ?);',
+          ['sms', Number(legacy.value), 60],
+        );
+      }
+    } catch (_) {}
+
     db.execute(`
       CREATE TABLE IF NOT EXISTS message_queue (
         id TEXT PRIMARY KEY,

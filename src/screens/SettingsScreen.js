@@ -4,8 +4,9 @@ import {
   StatusBar, ScrollView, Alert, ActivityIndicator, NativeModules, Platform, Switch, PermissionsAndroid,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
-import { getDefaultPlatform, setDefaultPlatform, getSmsPerHourLimit, setSmsPerHourLimit } from '../database/settingsDB';
+import { getDefaultPlatform, setDefaultPlatform } from '../database/settingsDB';
 import { getAllPlatforms, togglePlatformEnabled } from '../database/platformDB';
+import { getAllRateLimits, setRateLimit, clearRateLimit } from '../database/rateLimitDB';
 import { handleError, showError, showSuccess, ErrorMessages } from '../utils/errorHandler';
 import { runExpiryCheck } from '../utils/scheduler';
 import { hasWhatsAppCredentials } from '../utils/whatsappService';
@@ -19,7 +20,7 @@ export default function SettingsScreen({ navigation }) {
   const [defaultPlatform, setDefaultPlatformState] = useState(null);
   const [runningCheck, setRunningCheck]             = useState(false);
   const [waConfigured, setWaConfigured]             = useState(false);
-  const [smsPerHour, setSmsPerHourState]            = useState('300');
+  const [rateLimitDrafts, setRateLimitDrafts]       = useState({}); // platformId -> { count, hours, minutes }
   const [exactAlarmGranted, setExactAlarmGranted]   = useState(true);
   const [batteryExempt, setBatteryExempt]           = useState(true);
   const [smsGranted, setSmsGranted]                 = useState(true);
@@ -29,7 +30,17 @@ export default function SettingsScreen({ navigation }) {
   const loadSettings = async () => {
     try {
       setDefaultPlatformState(getDefaultPlatform());
-      setSmsPerHourState(String(getSmsPerHourLimit()));
+      const savedLimits = getAllRateLimits();
+      const drafts = {};
+      Object.keys(savedLimits).forEach((platformId) => {
+        const { limitCount, windowMinutes } = savedLimits[platformId];
+        drafts[platformId] = {
+          count: String(limitCount),
+          hours: String(Math.floor(windowMinutes / 60)),
+          minutes: String(windowMinutes % 60),
+        };
+      });
+      setRateLimitDrafts(drafts);
       setPlatforms(getAllPlatforms());
       const configured = await hasWhatsAppCredentials();
       setWaConfigured(configured);
@@ -113,18 +124,52 @@ export default function SettingsScreen({ navigation }) {
     }
   };
 
-  const handleSaveSmsLimit = () => {
-    const num = parseInt(smsPerHour, 10);
-    if (isNaN(num) || num <= 0) {
-      showError('Error', 'Enter a valid number greater than 0.');
+  const getDraft = (platformId) =>
+    rateLimitDrafts[platformId] ?? { count: '', hours: '', minutes: '' };
+
+  const updateDraft = (platformId, field, value) => {
+    setRateLimitDrafts((prev) => ({
+      ...prev,
+      [platformId]: { ...getDraft(platformId), [field]: value },
+    }));
+  };
+
+  const handleSaveRateLimit = (platformId, platformName) => {
+    const draft = getDraft(platformId);
+    const count = parseInt(draft.count, 10);
+    const hours = parseInt(draft.hours || '0', 10);
+    const minutes = parseInt(draft.minutes || '0', 10);
+    const windowMinutes = (isNaN(hours) ? 0 : hours) * 60 + (isNaN(minutes) ? 0 : minutes);
+
+    if (isNaN(count) || count <= 0) {
+      showError('Error', 'Enter a valid message count greater than 0.');
+      return;
+    }
+    if (windowMinutes <= 0) {
+      showError('Error', 'Set a time window greater than 0 (hours and/or minutes).');
       return;
     }
     try {
-      const ok = setSmsPerHourLimit(num);
+      const ok = setRateLimit(platformId, count, windowMinutes);
       if (!ok) { showError('Error', ErrorMessages.DB_WRITE); return; }
-      showSuccess('Saved', `SMS limit set to ${num} per hour.`);
+      const label = hours > 0 && minutes > 0
+        ? `${hours}h ${minutes}m`
+        : hours > 0 ? `${hours}h` : `${minutes}m`;
+      showSuccess('Saved', `${platformName}: max ${count} messages per ${label}.`);
     } catch (error) {
-      handleError(error, 'SettingsScreen.handleSaveSmsLimit');
+      handleError(error, 'SettingsScreen.handleSaveRateLimit');
+      showError('Error', ErrorMessages.DB_WRITE);
+    }
+  };
+
+  const handleClearRateLimit = (platformId, platformName) => {
+    try {
+      const ok = clearRateLimit(platformId);
+      if (!ok) { showError('Error', ErrorMessages.DB_WRITE); return; }
+      setRateLimitDrafts((prev) => ({ ...prev, [platformId]: { count: '', hours: '', minutes: '' } }));
+      showSuccess('Removed', `${platformName} now has no send limit.`);
+    } catch (error) {
+      handleError(error, 'SettingsScreen.handleClearRateLimit');
       showError('Error', ErrorMessages.DB_WRITE);
     }
   };
@@ -204,8 +249,9 @@ export default function SettingsScreen({ navigation }) {
         const isExpanded = expandedIds.has(platform.id);
         const isDefault  = defaultPlatform === platform.id;
         const isEnabled  = platform.is_enabled === 1;
-        const isSms      = platform.id === 'sms';
         const isWhatsApp = platform.platform_type === 'managed_remote';
+        const draft = getDraft(platform.id);
+        const hasSavedLimit = !!rateLimitDrafts[platform.id]?.count;
 
         return (
           <View key={platform.id} style={styles.accCard}>
@@ -242,31 +288,59 @@ export default function SettingsScreen({ navigation }) {
                   </Text>
                 )}
 
-                {isSms && (
-                  <View style={styles.accSection}>
-                    <Text style={styles.accSectionLabel}>Rate Limit</Text>
-                    <Text style={styles.accSectionHint}>
-                      Max SMS sent per rolling 60-minute window. Extra messages wait in the
-                      queue and send automatically — nothing is ever dropped.
-                    </Text>
-                    <View style={styles.smsLimitRow}>
-                      <TextInput
-                        style={styles.smsLimitInput}
-                        keyboardType="numeric"
-                        value={smsPerHour}
-                        onChangeText={(v) => setSmsPerHourState(v.replace(/[^0-9]/g, ''))}
-                        placeholder="e.g. 300"
-                        placeholderTextColor="#BDBDBD"
-                      />
-                      <TouchableOpacity
-                        onPress={handleSaveSmsLimit}
-                        style={styles.smsLimitSaveBtn}
-                        activeOpacity={0.8}>
-                        <Text style={styles.smsLimitSaveBtnText}>Save</Text>
-                      </TouchableOpacity>
-                    </View>
+                <View style={styles.accSection}>
+                  <Text style={styles.accSectionLabel}>Rate Limit</Text>
+                  <Text style={styles.accSectionHint}>
+                    Max messages sent per rolling time window you choose. Extra messages wait in
+                    the queue and send automatically once the window allows — nothing is dropped.
+                    Leave empty for unlimited.
+                  </Text>
+                  <View style={styles.rateLimitRow}>
+                    <TextInput
+                      style={styles.rateLimitCountInput}
+                      keyboardType="numeric"
+                      value={draft.count}
+                      onChangeText={(v) => updateDraft(platform.id, 'count', v.replace(/[^0-9]/g, ''))}
+                      placeholder="e.g. 5"
+                      placeholderTextColor="#BDBDBD"
+                    />
+                    <Text style={styles.rateLimitPerText}>per</Text>
+                    <TextInput
+                      style={styles.rateLimitTimeInput}
+                      keyboardType="numeric"
+                      value={draft.hours}
+                      onChangeText={(v) => updateDraft(platform.id, 'hours', v.replace(/[^0-9]/g, ''))}
+                      placeholder="0"
+                      placeholderTextColor="#BDBDBD"
+                    />
+                    <Text style={styles.rateLimitUnitText}>h</Text>
+                    <TextInput
+                      style={styles.rateLimitTimeInput}
+                      keyboardType="numeric"
+                      value={draft.minutes}
+                      onChangeText={(v) => updateDraft(platform.id, 'minutes', v.replace(/[^0-9]/g, ''))}
+                      placeholder="0"
+                      placeholderTextColor="#BDBDBD"
+                    />
+                    <Text style={styles.rateLimitUnitText}>m</Text>
                   </View>
-                )}
+                  <View style={styles.rateLimitBtnRow}>
+                    <TouchableOpacity
+                      onPress={() => handleSaveRateLimit(platform.id, platform.name)}
+                      style={styles.smsLimitSaveBtn}
+                      activeOpacity={0.8}>
+                      <Text style={styles.smsLimitSaveBtnText}>Save</Text>
+                    </TouchableOpacity>
+                    {hasSavedLimit && (
+                      <TouchableOpacity
+                        onPress={() => handleClearRateLimit(platform.id, platform.name)}
+                        style={styles.rateLimitClearBtn}
+                        activeOpacity={0.8}>
+                        <Text style={styles.rateLimitClearBtnText}>Remove Limit</Text>
+                      </TouchableOpacity>
+                    )}
+                  </View>
+                </View>
 
                 {isWhatsApp && (
                   <TouchableOpacity
@@ -534,13 +608,28 @@ const styles = StyleSheet.create({
   defaultRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   defaultRowText: { fontSize: 14, fontWeight: '600', color: '#1A1A2E' },
 
-  smsLimitRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  smsLimitInput: {
-    flex: 1, fontSize: 16, color: '#1A1A2E',
-    paddingVertical: 8, paddingHorizontal: 12,
+  rateLimitRow: { flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
+  rateLimitCountInput: {
+    width: 64, fontSize: 15, color: '#1A1A2E', textAlign: 'center',
+    paddingVertical: 8, paddingHorizontal: 8,
     backgroundColor: '#F8F9FA', borderRadius: 10,
     borderWidth: 1, borderColor: '#EEEEEE',
   },
+  rateLimitPerText: { fontSize: 13, color: '#9E9E9E', fontWeight: '600' },
+  rateLimitTimeInput: {
+    width: 48, fontSize: 15, color: '#1A1A2E', textAlign: 'center',
+    paddingVertical: 8, paddingHorizontal: 6,
+    backgroundColor: '#F8F9FA', borderRadius: 10,
+    borderWidth: 1, borderColor: '#EEEEEE',
+  },
+  rateLimitUnitText: { fontSize: 13, color: '#9E9E9E', fontWeight: '600', marginRight: 4 },
+  rateLimitBtnRow: { flexDirection: 'row', gap: 10, marginTop: 12 },
+  rateLimitClearBtn: {
+    backgroundColor: '#FFF5F5', paddingHorizontal: 16, paddingVertical: 10,
+    borderRadius: 10, borderWidth: 1, borderColor: '#FFE0E0',
+  },
+  rateLimitClearBtnText: { color: '#D32F2F', fontWeight: '600', fontSize: 13 },
+
   smsLimitSaveBtn: {
     backgroundColor: '#1A1A2E', paddingHorizontal: 18,
     paddingVertical: 10, borderRadius: 10,

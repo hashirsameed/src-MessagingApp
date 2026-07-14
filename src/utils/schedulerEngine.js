@@ -132,13 +132,18 @@ export const runExpiryCheck = async (parentTraceId = null) => {
       checked: expiringContacts.length 
     });
 
-    if (queued > 0) {
-      debugTrace('RunExpiryCheckAutoProcessQueueBefore', { traceId });
-      processQueue(undefined, traceId).catch((err) => {
-        debugTraceError('RunExpiryCheckAutoProcessQueueCatch', err, { function: 'runExpiryCheck.autoProcess', traceId });
-        handleError(err, 'runExpiryCheck.autoProcess');
-      });
-    }
+    // Always attempt processQueue(), not just when this run queued something
+    // new. A rate-limited item goes back to PENDING and just sits there
+    // until *something* calls processQueue() again — if nothing new gets
+    // matched on a later cycle (queued stays 0), that PENDING item was
+    // stuck forever even after its rate-limit window rolled over.
+    // processQueue() itself is cheap to call with nothing to do — it exits
+    // immediately if claimPendingQueue() finds no PENDING rows.
+    debugTrace('RunExpiryCheckAutoProcessQueueBefore', { traceId, queued });
+    processQueue(undefined, traceId).catch((err) => {
+      debugTraceError('RunExpiryCheckAutoProcessQueueCatch', err, { function: 'runExpiryCheck.autoProcess', traceId });
+      handleError(err, 'runExpiryCheck.autoProcess');
+    });
 
     debugTraceDuration('RunExpiryCheckEnd', startTime, { 
       traceId, 
