@@ -375,16 +375,36 @@ export const rescheduleAlarmsForTemplate = async (template, allContacts) => {
 };
 
 export const rearmAllScheduledAlarmsAfterBoot = async () => {
+  // Lazy require (not a top-level import) — alarmFireCore.js imports
+  // computeTargetAlarmTimestamp from this module, so a top-level import
+  // here would be circular. By the time this function actually runs,
+  // both modules are fully loaded and this resolves normally.
+  const { fireScheduledPair } = require('./alarmFireCore');
+
   const activeRows = getAllActiveScheduledAlarms();
   let rearmed = 0;
-  if (Platform.OS !== 'android' || !isAlarmModuleAvailable()) return rearmed;
+  let firedImmediately = 0;
 
   for (const row of activeRows) {
     const triggerMs = new Date(row.trigger_at).getTime();
-    if (isNaN(triggerMs) || triggerMs <= Date.now()) {
+
+    if (isNaN(triggerMs)) {
       markScheduledAlarmCancelled(row.contact_id, row.template_id);
       continue;
     }
+
+    if (triggerMs <= Date.now()) {
+      // Missed during downtime (device off/killed through the trigger
+      // moment) — this used to silently cancel the row, which meant the
+      // reminder was simply never sent and nothing recorded it. Fire it
+      // now through the same claim->validate->queue path AlarmReceiver
+      // itself uses, instead of dropping it.
+      const outcome = await fireScheduledPair(row.contact_id, row.template_id, generateTraceId('bootMissed'));
+      if (outcome === 'fired' || outcome === 'already_handled') firedImmediately += 1;
+      continue;
+    }
+
+    if (Platform.OS !== 'android' || !isAlarmModuleAvailable()) continue;
 
     try {
       const result = await AlarmModule.scheduleExactAlarm(
@@ -399,7 +419,11 @@ export const rearmAllScheduledAlarmsAfterBoot = async () => {
     }
   }
 
-  return rearmed;
+  debugTrace('RearmAllScheduledAlarmsAfterBootSummary', {
+    totalRows: activeRows.length, rearmed, firedImmediately,
+  });
+
+  return rearmed + firedImmediately;
 };
 export const cancelAlarmsForPlatform = async (platformId) => {
   const templates = getAllTemplates().filter(

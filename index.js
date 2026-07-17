@@ -5,7 +5,7 @@
 import { AppRegistry } from 'react-native';
 import App from './App';
 import { name as appName } from './app.json';
-import { AlarmFiredTask, RescheduleAlarmsTask, SafetyNetTask } from './src/utils/alarmHeadlessTask';
+import { AlarmFiredTask, RescheduleAlarmsTask, SafetyNetTask, ReconcilerTask } from './src/utils/alarmHeadlessTask';
 import { debugTrace, debugTraceError } from './src/utils/debugTrace';
 
 const wrapHeadlessTask = (taskName, taskFn) => async (data) => {
@@ -31,3 +31,4 @@ AppRegistry.registerComponent(appName, () => App);
 AppRegistry.registerHeadlessTask('AlarmFiredTask', () => wrapHeadlessTask('AlarmFiredTask', AlarmFiredTask));
 AppRegistry.registerHeadlessTask('RescheduleAlarmsTask', () => wrapHeadlessTask('RescheduleAlarmsTask', RescheduleAlarmsTask));
 AppRegistry.registerHeadlessTask('SafetyNetTask', () => wrapHeadlessTask('SafetyNetTask', SafetyNetTask));
+AppRegistry.registerHeadlessTask('ReconcilerTask', () => wrapHeadlessTask('ReconcilerTask', ReconcilerTask));

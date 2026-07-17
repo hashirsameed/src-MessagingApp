@@ -29,6 +29,14 @@ object NextAlarmRepository {
         val contactName: String,
         val templateTitle: String,
         val triggerAtIso: String,
+        // True when trigger_at has already passed but the row is still
+        // 'scheduled' — i.e. it's overdue and waiting for the next
+        // SafetyNetTask (15-min) cycle to actually fire it, not a
+        // genuinely upcoming reminder. Computed with the exact same
+        // trigger_at <= datetime('now') comparison getDueScheduledAlarms()
+        // uses on the JS side, so the two never disagree about what
+        // counts as "due".
+        val isOverdue: Boolean,
     )
 
     /**
@@ -57,7 +65,8 @@ object NextAlarmRepository {
             db.use {
                 val cursor = it.rawQuery(
                     """
-                    SELECT c.name AS contact_name, t.title AS template_title, sa.trigger_at AS trigger_at
+                    SELECT c.name AS contact_name, t.title AS template_title, sa.trigger_at AS trigger_at,
+                           (sa.trigger_at <= datetime('now')) AS is_overdue
                     FROM scheduled_alarms sa
                     JOIN contacts c ON c.id = sa.contact_id
                     JOIN templates t ON t.id = sa.template_id
@@ -73,6 +82,7 @@ object NextAlarmRepository {
                             contactName = c.getString(c.getColumnIndexOrThrow("contact_name")),
                             templateTitle = c.getString(c.getColumnIndexOrThrow("template_title")),
                             triggerAtIso = c.getString(c.getColumnIndexOrThrow("trigger_at")),
+                            isOverdue = c.getInt(c.getColumnIndexOrThrow("is_overdue")) != 0,
                         )
                     } else {
                         null

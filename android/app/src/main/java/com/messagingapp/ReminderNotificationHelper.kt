@@ -65,7 +65,14 @@ object ReminderNotificationHelper {
         val pendingCount = NextAlarmRepository.queryPendingCount(context)
         val pendingSuffix = if (pendingCount > 0) "  •  $pendingCount pending" else ""
 
-        val (title, body) = if (next != null) {
+        val (title, body) = if (next != null && next.isOverdue) {
+            // Overdue but still 'scheduled' — SafetyNetTask hasn't picked
+            // this pair up yet (its 15-min cycle hasn't ticked since this
+            // became due). Showing "Next: X at <past time>" here would look
+            // like a stuck/broken promise; say what's actually happening.
+            "Reminder engine active" to
+                "Sending shortly: ${next.contactName} — ${next.templateTitle}$pendingSuffix"
+        } else if (next != null) {
             "Reminder engine active" to
                 "Next: ${next.contactName} — ${next.templateTitle} at " +
                 "${NextAlarmRepository.formatPakistanTime(next.triggerAtIso)}$pendingSuffix"

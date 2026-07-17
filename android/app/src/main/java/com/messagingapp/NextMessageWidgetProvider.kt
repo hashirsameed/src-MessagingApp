@@ -82,7 +82,7 @@ class NextMessageWidgetProvider : AppWidgetProvider() {
             views.setTextViewText(R.id.widget_template_title, next.templateTitle)
             views.setTextViewText(
                 R.id.widget_trigger_time,
-                NextAlarmRepository.formatPakistanTime(next.triggerAtIso),
+                if (next.isOverdue) "Sending shortly" else NextAlarmRepository.formatPakistanTime(next.triggerAtIso),
             )
 
             return views

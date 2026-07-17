@@ -115,6 +115,18 @@ class AlarmTaskService : HeadlessJsTaskService() {
             )
         }
 
+        if (intent.action == "RECONCILE_CHECK") {
+            TraceLog.d("AlarmTaskServiceConfigReconciler", mapOf("timeoutMs" to 60000, "taskName" to "ReconcilerTask"))
+            return HeadlessJsTaskConfig(
+                "ReconcilerTask",
+                Arguments.createMap(),
+                // Longer timeout: this walks every contact once, unlike
+                // SafetyNetTask which only touches already-due rows.
+                60000,
+                true,
+            )
+        }
+
         val extras: Bundle = intent.extras ?: run {
             TraceLog.d(
                 "AlarmTaskServiceGetTaskConfigExit",

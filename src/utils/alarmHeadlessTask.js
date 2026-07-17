@@ -1,200 +1,24 @@
-import { getContactById } from '../database/contactDB';
-import { getTemplateById } from '../database/templateDB';
-import { getDefaultPlatform } from '../database/settingsDB';
-import { addToQueueDetailed } from '../database/messageQueueDB';
-import { processQueue } from './queueProcessor';
-import {
-  claimScheduledAlarmForFiring,
-  releaseScheduledAlarmClaim,
-  markScheduledAlarmFired,
-  markScheduledAlarmCancelled,
-} from '../database/scheduledAlarmDB';
+import { fireScheduledPair } from './alarmFireCore';
+import { getDueScheduledAlarms } from '../database/scheduledAlarmDB';
 import { recordEngineRun } from '../database/engineStatusDB';
-import { computeTargetAlarmTimestamp, rearmAllScheduledAlarmsAfterBoot } from './alarmScheduler';
-import { runExpiryCheck } from './schedulerEngine';
+import { rearmAllScheduledAlarmsAfterBoot, scheduleAlarmsForContact } from './alarmScheduler';
+import { processQueue } from './queueProcessor';
+import { getAllContacts } from '../database/contactDB';
+import { getActiveTemplates } from '../database/templateDB';
 import { handleError } from './errorHandler';
 import { debugTrace, debugTraceError, debugTraceDuration, generateTraceId } from './debugTrace';
 
-const TRIGGER_DRIFT_TOLERANCE_MS = 60 * 1000;
-
+/**
+ * AlarmFiredTask — thin wrapper. All the actual claim/validate/queue logic
+ * lives in alarmFireCore.fireScheduledPair(), shared with SafetyNetTask and
+ * the boot-time missed-alarm recovery in alarmScheduler.js. Keeping one
+ * shared core is what prevents the "dual paths, different rules" bug class.
+ */
 export const AlarmFiredTask = async (data) => {
-  const startTime = Date.now();
-  const { contactId, templateId, requestCode } = data ?? {};
+  const { contactId, templateId } = data ?? {};
   const traceId = generateTraceId('alarmFired');
-
-  debugTrace('AlarmFiredTaskStart', {
-    traceId,
-    contactId,
-    templateId,
-    requestCode,
-    status: 'starting',
-  });
-
-  try {
-    if (!contactId || !templateId) {
-      debugTraceDuration('AlarmFiredTaskExit', startTime, {
-        traceId,
-        contactId,
-        templateId,
-        requestCode,
-        exitReason: 'missing_contact_or_template_id',
-      });
-      return;
-    }
-
-    // Atomic CAS guard — this is what makes it safe for AlarmReceiver,
-    // ExpirySafetyNetWorker, and a post-boot reschedule to all potentially
-    // reach this same (contactId, templateId) pair. Only the caller that
-    // wins the 'scheduled' -> 'firing' transition proceeds; everyone else
-    // bails here with zero side effects. This is the fix for the
-    // duplicate-send-on-reopen and safety-net-resends-already-sent bugs.
-    debugTrace('ClaimAlarmBefore', { traceId, contactId, templateId, requestCode });
-    const { claimed, row: alarmRow } = claimScheduledAlarmForFiring(contactId, templateId);
-    debugTrace('ClaimAlarmAfter', {
-      traceId,
-      contactId,
-      templateId,
-      requestCode,
-      claimed,
-      status: alarmRow?.status ?? 'not_found',
-      triggerAt: alarmRow?.trigger_at ?? '',
-    });
-
-    if (!claimed) {
-      debugTraceDuration('AlarmFiredTaskExit', startTime, {
-        traceId,
-        contactId,
-        templateId,
-        requestCode,
-        exitReason: 'already_claimed_or_no_active_row',
-        status: alarmRow?.status ?? 'not_found',
-      });
-      return;
-    }
-
-    debugTrace('LoadTemplateBefore', { traceId, contactId, templateId, requestCode });
-    const template = getTemplateById(templateId);
-    debugTrace('LoadTemplateAfter', {
-      traceId,
-      contactId,
-      templateId,
-      requestCode,
-      found: !!template,
-      isActive: template?.is_active ?? '',
-    });
-
-    if (!template) {
-      debugTraceDuration('AlarmFiredTaskExit', startTime, {
-        traceId, contactId, templateId, requestCode, exitReason: 'template_not_found',
-      });
-      markScheduledAlarmCancelled(contactId, templateId);
-      return;
-    }
-    if (template.is_active !== 1) {
-      debugTraceDuration('AlarmFiredTaskExit', startTime, {
-        traceId, contactId, templateId, requestCode, exitReason: 'template_inactive', status: 'inactive',
-      });
-      markScheduledAlarmCancelled(contactId, templateId);
-      return;
-    }
-
-    debugTrace('LoadContactBefore', { traceId, contactId, templateId, requestCode });
-    const contact = getContactById(contactId);
-    debugTrace('LoadContactAfter', {
-      traceId, contactId, templateId, requestCode, found: !!contact,
-    });
-
-    if (!contact) {
-      debugTraceDuration('AlarmFiredTaskExit', startTime, {
-        traceId, contactId, templateId, requestCode, exitReason: 'contact_deleted',
-      });
-      markScheduledAlarmCancelled(contactId, templateId);
-      return;
-    }
-
-    debugTrace('DriftValidationBefore', {
-      traceId, contactId, templateId, requestCode, originalTriggerAt: alarmRow.trigger_at,
-    });
-    const recomputed = computeTargetAlarmTimestamp(contact, template);
-    const originalMs = new Date(alarmRow.trigger_at).getTime();
-    const driftMs = recomputed === null ? null : Math.abs(recomputed - originalMs);
-
-    debugTrace('DriftValidationAfter', {
-      traceId,
-      contactId,
-      templateId,
-      requestCode,
-      recomputedMs: recomputed ?? '',
-      originalMs,
-      driftMs: driftMs ?? 'null_recomputed',
-      toleranceMs: TRIGGER_DRIFT_TOLERANCE_MS,
-      passed: recomputed !== null && driftMs <= TRIGGER_DRIFT_TOLERANCE_MS,
-    });
-
-    if (recomputed === null || Math.abs(recomputed - originalMs) > TRIGGER_DRIFT_TOLERANCE_MS) {
-      debugTraceDuration('AlarmFiredTaskExit', startTime, {
-        traceId, contactId, templateId, requestCode, exitReason: 'trigger_drift_detected',
-      });
-      markScheduledAlarmCancelled(contactId, templateId);
-      return;
-    }
-
-    const defaultPlatform = template.platform_id || getDefaultPlatform() || 'sms';
-    debugTrace('QueueInsertionBefore', {
-      traceId, contactId, templateId, requestCode, platformId: defaultPlatform,
-    });
-    const { added, reason } = addToQueueDetailed(contactId, templateId, defaultPlatform, traceId);
-    debugTrace('QueueInsertionAfter', {
-      traceId, contactId, templateId, requestCode, added, reason,
-    });
-
-    if (added) {
-      debugTrace('AlarmStatusUpdateBefore', {
-        traceId, contactId, templateId, requestCode, targetStatus: 'fired', reason: 'queue_added',
-      });
-      markScheduledAlarmFired(contactId, templateId);
-      debugTrace('ProcessQueueBefore', { traceId, contactId, templateId, requestCode });
-      await processQueue(null, traceId);
-      debugTrace('ProcessQueueAfter', { traceId, contactId, templateId, requestCode });
-    } else if (reason === 'ALREADY_PENDING' || reason === 'ALREADY_SENT_RECENTLY') {
-      debugTrace('AlarmFiredTaskDedupeSkip', {
-        traceId, contactId, templateId, requestCode, reason, exitReason: 'already_queued_or_sent',
-      });
-      debugTrace('AlarmStatusUpdateBefore', {
-        traceId, contactId, templateId, requestCode, targetStatus: 'fired', reason,
-      });
-      markScheduledAlarmFired(contactId, templateId);
-    } else {
-      // Transient failure (e.g. DB error inside addToQueueDetailed) — release
-      // the claim back to 'scheduled' so the safety-net worker can retry
-      // this pair later instead of it being stuck in 'firing' forever.
-      releaseScheduledAlarmClaim(contactId, templateId);
-      debugTrace('AlarmFiredTaskExit', {
-        traceId,
-        contactId,
-        templateId,
-        requestCode,
-        exitReason: 'queue_db_error',
-        reason,
-        status: 'scheduled',
-        note: 'claim_released_for_fallback_recovery',
-      });
-    }
-
-    recordEngineRun('alarmFired', { traceId, contactId, templateId, itemsProcessed: added ? 1 : 0 });
-    debugTraceDuration('AlarmFiredTaskEnd', startTime, {
-      traceId, contactId, templateId, requestCode, outcome: 'completed',
-    });
-  } catch (error) {
-    releaseScheduledAlarmClaim(contactId, templateId);
-    debugTraceError('AlarmFiredTaskCatch', error, {
-      traceId, function: 'AlarmFiredTask', contactId, templateId, requestCode,
-    });
-    handleError(error, 'AlarmFiredTask');
-    debugTraceDuration('AlarmFiredTaskEnd', startTime, {
-      traceId, contactId, templateId, requestCode, outcome: 'error',
-    });
-  }
+  debugTrace('AlarmFiredTaskStart', { traceId, contactId, templateId, source: 'exact_alarm' });
+  await fireScheduledPair(contactId, templateId, traceId);
 };
 
 export const RescheduleAlarmsTask = async () => {
@@ -217,27 +41,89 @@ export const RescheduleAlarmsTask = async () => {
 };
 
 /**
- * SafetyNetTask
+ * SafetyNetTask — Level 1 / Active Queue (Micro Safety-Net).
  *
  * Triggered by ExpirySafetyNetWorker (native WorkManager, ~15 min cadence).
- * Reuses the exact same runExpiryCheck() the app already runs on foreground
- * startup/resume/interval — this is intentional: it means "due but never
- * queued" and "queued but stuck" contacts get caught the same way whether
- * the app is open or fully killed, with one code path to maintain.
+ * Reads scheduled_alarms directly for anything still 'scheduled' whose
+ * trigger_at has already passed, and fires each one through the exact same
+ * fireScheduledPair() path the exact-alarm receiver uses. No independent
+ * rescan of contacts/templates, no separate grace-period rule — this was
+ * the source of the silent-drop bug (overdue-by->1hr contacts were
+ * permanently skipped and never queued). That rescan-based logic has been
+ * removed from this path entirely; it no longer calls runExpiryCheck().
+ *
+ * Still finishes with a processQueue() pass — orthogonal to alarm firing —
+ * to retry any message_queue row stuck in PENDING (e.g. reverted there
+ * after an SMS rate-limit) since the app may have been closed the whole
+ * time otherwise nothing would ever call processQueue() again for it.
  */
 export const SafetyNetTask = async () => {
   const startTime = Date.now();
   const traceId = generateTraceId('safetyNet');
   debugTrace('SafetyNetTaskStart', { traceId, status: 'starting' });
   try {
-    const summary = await runExpiryCheck(traceId);
-    recordEngineRun('safetyNet', { traceId, itemsProcessed: summary?.queued ?? 0 });
+    const dueRows = getDueScheduledAlarms();
+    debugTrace('SafetyNetTaskDueRows', { traceId, dueCount: dueRows.length });
+
+    let processed = 0;
+    for (const row of dueRows) {
+      const outcome = await fireScheduledPair(row.contact_id, row.template_id, traceId);
+      if (outcome === 'fired') processed += 1;
+    }
+
+    await processQueue(undefined, traceId);
+
+    recordEngineRun('safetyNet', { traceId, itemsProcessed: processed });
     debugTraceDuration('SafetyNetTaskEnd', startTime, {
-      traceId, outcome: 'completed', summary: JSON.stringify(summary ?? {}),
+      traceId, outcome: 'completed', dueCount: dueRows.length, processed,
     });
   } catch (error) {
     debugTraceError('SafetyNetTaskCatch', error, { traceId, function: 'SafetyNetTask' });
     handleError(error, 'SafetyNetTask');
     debugTraceDuration('SafetyNetTaskEnd', startTime, { traceId, outcome: 'error' });
+  }
+};
+
+/**
+ * ReconcilerTask — Level 2 / Reconciler (Macro Safety-Net).
+ *
+ * Triggered once a day by a separate low-frequency WorkManager job (see
+ * ReconcilerWorker.kt). Does NOT fire anything — its only job is making
+ * sure every (contact, active template) pair has a corresponding
+ * scheduled_alarms row, so Level 1 always has something to find. Reuses
+ * scheduleAlarmsForContact(), the same function contact-add/template-edit
+ * already call; upsertScheduledAlarm() underneath is idempotent and will
+ * never resurrect an already-fired/firing pair, so running this over every
+ * contact daily is safe to repeat.
+ *
+ * This is the catch-up for the (rare) case where the synchronous
+ * scheduling call at contact-add/template-edit time didn't complete or
+ * persist (app killed mid-write, native module error, permission not yet
+ * granted at that moment, etc.) — not a periodic scheduler in its own
+ * right.
+ */
+export const ReconcilerTask = async () => {
+  const startTime = Date.now();
+  const traceId = generateTraceId('reconciler');
+  debugTrace('ReconcilerTaskStart', { traceId, status: 'starting' });
+  try {
+    const contacts = getAllContacts();
+    const templates = getActiveTemplates();
+    debugTrace('ReconcilerTaskLoaded', { traceId, contactCount: contacts.length, templateCount: templates.length });
+
+    let touched = 0;
+    for (const contact of contacts) {
+      await scheduleAlarmsForContact(contact, templates);
+      touched += 1;
+    }
+
+    recordEngineRun('reconciler', { traceId, itemsProcessed: touched });
+    debugTraceDuration('ReconcilerTaskEnd', startTime, {
+      traceId, outcome: 'completed', contactsTouched: touched,
+    });
+  } catch (error) {
+    debugTraceError('ReconcilerTaskCatch', error, { traceId, function: 'ReconcilerTask' });
+    handleError(error, 'ReconcilerTask');
+    debugTraceDuration('ReconcilerTaskEnd', startTime, { traceId, outcome: 'error' });
   }
 };

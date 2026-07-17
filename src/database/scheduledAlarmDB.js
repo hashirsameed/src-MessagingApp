@@ -157,6 +157,28 @@ export const getAllActiveScheduledAlarms = () => {
   }
 };
 
+/**
+ * getDueScheduledAlarms — Level 1 (Active Queue / Micro Safety-Net) source.
+ * Every row still 'scheduled' whose trigger_at has already passed. This is
+ * the same status/table AlarmFiredTask itself operates on — no separate
+ * rescan-and-filter logic, no independent grace-period rule. Reuses
+ * idx_scheduled_alarms_status.
+ */
+export const getDueScheduledAlarms = () => {
+  try {
+    const db = getDB();
+    const result = db.execute(
+      `SELECT * FROM scheduled_alarms
+       WHERE status = 'scheduled' AND trigger_at <= datetime('now')
+       ORDER BY trigger_at ASC;`,
+    );
+    return result.rows?._array || [];
+  } catch (error) {
+    handleError(error, 'getDueScheduledAlarms');
+    return [];
+  }
+};
+
 export const markScheduledAlarmCancelled = (contactId, templateId) => {
   debugTrace('MarkScheduledAlarmCancelledStart', { contactId, templateId });
   try {
