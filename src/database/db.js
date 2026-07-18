@@ -119,6 +119,38 @@ export const getDB = () => {
     }
     // ────────────────────────────────────────────────────────────────────
 
+    // ── QA test contacts seed (fixed IDs) ─────────────────────────────────
+    // 5 real hardcoded contacts for manual on-device testing. INSERT OR
+    // IGNORE keyed on fixed ids means: already present (same build, app
+    // just reopened) → no-op; row missing (fresh install, or uninstall +
+    // reinstall wiped the DB file) → recreated automatically. Never
+    // overwrites an existing row, so anything a tester changes via the
+    // Test panel (expiry_date/expiry_datetime) survives normal app restarts.
+    //
+    // ⚠️ These are real phone numbers. The Scan/Update Time test actions run
+    // the REAL send path (SafetyNetTask → fireScheduledPair → actual SMS
+    // intent) — every Scan will text these numbers for real.
+    try {
+      const testContacts = [
+        { id: 'seed_test_contact_01', name: 'Hashir',        phone_number: '03102697154', expiry_datetime: '2026-07-18T09:00:00Z' },
+        { id: 'seed_test_contact_02', name: 'Hashir Sameed', phone_number: '03422900148', expiry_datetime: '2026-07-25T09:00:00Z' },
+        { id: 'seed_test_contact_03', name: 'Auon Bhai',     phone_number: '03172002094', expiry_datetime: '2026-08-30T09:00:00Z' },
+        { id: 'seed_test_contact_04', name: 'Ayesha',        phone_number: '03453035685', expiry_datetime: '2026-08-18T09:00:00Z' },
+        { id: 'seed_test_contact_05', name: 'Hussain',       phone_number: '03132988120', expiry_datetime: '2026-06-18T09:00:00Z' },
+      ];
+
+      for (const c of testContacts) {
+        db.execute(
+          `INSERT OR IGNORE INTO contacts (id, name, phone_number, expiry_date, expiry_datetime, created_at)
+           VALUES (?, ?, ?, ?, ?, datetime('now'));`,
+          [c.id, c.name, c.phone_number, c.expiry_datetime.slice(0, 10), c.expiry_datetime],
+        );
+      }
+    } catch (error) {
+      console.log('QA test contacts seed error:', error);
+    }
+    // ────────────────────────────────────────────────────────────────────
+
     db.execute(`
       CREATE TABLE IF NOT EXISTS platforms (
         id TEXT PRIMARY KEY,
