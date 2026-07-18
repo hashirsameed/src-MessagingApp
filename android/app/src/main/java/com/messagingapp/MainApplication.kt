@@ -31,6 +31,7 @@ class MainApplication : Application(), ReactApplication {
     super.onCreate()
     loadReactNative(this)
     scheduleSafetyNetWorker()
+    scheduleReconcilerWorker()
     startPersistentReminderService()
   }
 
@@ -44,6 +45,21 @@ class MainApplication : Application(), ReactApplication {
     val request = PeriodicWorkRequestBuilder<ExpirySafetyNetWorker>(15, TimeUnit.MINUTES).build()
     WorkManager.getInstance(this).enqueueUniquePeriodicWork(
       "expiry_safety_net_worker",
+      ExistingPeriodicWorkPolicy.KEEP,
+      request,
+    )
+  }
+
+  /**
+   * Level 2 / Macro Safety-Net — once a day. Separate from the 15-min
+   * worker above: this one never fires a reminder, it only makes sure
+   * scheduled_alarms has a row for every (contact, active template) pair.
+   * KEEP policy, same reasoning as above — safe to call on every process start.
+   */
+  private fun scheduleReconcilerWorker() {
+    val request = PeriodicWorkRequestBuilder<ReconcilerWorker>(1, TimeUnit.DAYS).build()
+    WorkManager.getInstance(this).enqueueUniquePeriodicWork(
+      "reconciler_daily_worker",
       ExistingPeriodicWorkPolicy.KEEP,
       request,
     )
