@@ -331,6 +331,35 @@ export const getDB = () => {
     }
     // ────────────────────────────────────────────────────────────────────
 
+    // ── Audit log (db_action_log) ─────────────────────────────────────────
+    // Records every insert/update/delete on contacts and scheduled_alarms,
+    // independent of the scheduling logic itself — a pure observation
+    // layer. Persists across app restarts (unlike debugTrace, which is
+    // console.log-only and __DEV__-gated), so "what happened to this
+    // contact, and when" can be answered even after the app was closed
+    // and reopened, including across a phone reboot.
+    db.execute(`
+      CREATE TABLE IF NOT EXISTS db_action_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        table_name TEXT NOT NULL,
+        row_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        old_value TEXT,
+        new_value TEXT,
+        occurred_at TEXT DEFAULT (datetime('now'))
+      );
+    `);
+
+    try {
+      db.execute(`
+        CREATE INDEX IF NOT EXISTS idx_db_action_log_row
+        ON db_action_log(table_name, row_id);
+      `);
+    } catch (error) {
+      console.log('db_action_log row index error:', error);
+    }
+    // ────────────────────────────────────────────────────────────────────
+
     return db;
   } catch (error) {
     console.log('DB Error:', error);

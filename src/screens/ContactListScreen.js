@@ -13,22 +13,21 @@ import { validateDate, validateTime } from '../utils/validators';
 import { ErrorMessages, handleError, showError, showConfirm, showSuccess } from '../utils/errorHandler';
 import { runExpiryCheck } from '../utils/schedulerEngine';
 import { cancelAlarmsForContact } from '../utils/alarmScheduler';
-import { SafetyNetTask } from '../utils/alarmHeadlessTask';
+import { scanDatabase } from '../utils/dbScan';
 
 export default function ContactListScreen({ navigation }) {
   const [contacts, setContacts] = useState([]);
   const [templates, setTemplates] = useState([]);
 
   // Test panel (__DEV__ only) — which contact's panel is open, the
-  // scheduled_alarms rows for it (read-only "already set" display), the
-  // tester's new-date/new-time inputs, and a busy flag for the Scan button.
+  // scheduled_alarms rows for it (read-only "already set" display), and
+  // the tester's new-date/new-time inputs for the Update Time button.
   const [testOpenId, setTestOpenId] = useState(null);
   const [testAlarms, setTestAlarms] = useState([]);
   const [testDate, setTestDate] = useState('');
   const [testTime, setTestTime] = useState('');
   const [testMeridiem, setTestMeridiem] = useState('AM');
   const [testErrors, setTestErrors] = useState({});
-  const [scanBusy, setScanBusy] = useState(false);
 
   const loadContacts = () => {
     try {
@@ -110,22 +109,19 @@ export default function ContactListScreen({ navigation }) {
     }
   };
 
-  // Scan — calls the exact production SafetyNetTask (real fireScheduledPair
-  // path, no dry run). This button does not do anything on its own besides
-  // invoking that one real function and then re-reading the DB to reflect
-  // whatever it did (fired / cancelled / left scheduled).
-  const handleScan = async (contact) => {
-    setScanBusy(true);
-    try {
-      await SafetyNetTask();
-      loadContacts();
-      refreshTestAlarms(contact.id);
-    } catch (error) {
-      handleError(error, 'ContactListScreen.handleScan');
-      showError('Error', ErrorMessages.UNKNOWN);
-    } finally {
-      setScanBusy(false);
-    }
+  // Scan — calls ONLY scanDatabase() (dbScan.js), which is pure SELECT
+  // queries against scheduled_alarms and message_queue. Nothing else runs:
+  // no fireScheduledPair, no processQueue, no scheduleAlarmsForContact, no
+  // native alarm/SMS call. Pressing this can never send a real message or
+  // change any row — it only reads current state and reports it.
+  const handleScan = () => {
+    const result = scanDatabase();
+    showSuccess(
+      'Database Scan',
+      `Scheduled: ${result.summary.scheduledCount}\n` +
+      `Overdue (waiting): ${result.summary.overdueCount}\n` +
+      `Pending in queue: ${result.summary.pendingQueueCount}`
+    );
   };
 
   useFocusEffect(
@@ -312,11 +308,8 @@ export default function ContactListScreen({ navigation }) {
               <TouchableOpacity style={styles.btnUpdateTime} onPress={() => handleUpdateTestTime(item)}>
                 <Text style={styles.btnUpdateTimeText}>Update Time</Text>
               </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.btnScan, scanBusy && styles.btnScanDisabled]}
-                onPress={() => handleScan(item)}
-                disabled={scanBusy}>
-                <Text style={styles.btnScanText}>{scanBusy ? 'Scanning...' : 'Scan'}</Text>
+              <TouchableOpacity style={styles.btnScan} onPress={handleScan}>
+                <Text style={styles.btnScanText}>Scan</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -464,7 +457,6 @@ const styles = StyleSheet.create({
     flex: 1, backgroundColor: '#1A1A2E',
     paddingVertical: 10, borderRadius: 10, alignItems: 'center',
   },
-  btnScanDisabled: { backgroundColor: '#9E9E9E' },
   btnScanText: { color: '#fff', fontWeight: '600', fontSize: 13 },
   fab: {
     position: 'absolute', bottom: 24, right: 20, left: 20,

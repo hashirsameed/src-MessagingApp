@@ -1,6 +1,7 @@
 import { getDB } from './db';
 import { handleError } from '../utils/errorHandler';
 import { debugTrace, debugTraceDbWrite, debugTraceError } from '../utils/debugTrace';
+import { logAction } from './auditLogDB';
 
 const makeId = (contactId, templateId) => `${contactId}_${templateId}`;
 
@@ -77,6 +78,10 @@ export const upsertScheduledAlarm = (contactId, templateId, requestCode, trigger
     );
 
     logAlarmCounts(db, contactId, templateId);
+
+    logAction('scheduled_alarms', id, 'UPSERT',
+      existing ? { status: existing.status } : null,
+      { status: 'scheduled_or_preserved', trigger_at: triggerAtISO, request_code: requestCode });
 
     debugTrace('UpsertScheduledAlarmEnd', { contactId, templateId, requestCode, pk: id });
     return true;
@@ -198,6 +203,7 @@ export const markScheduledAlarmCancelled = (contactId, templateId) => {
       `UPDATE scheduled_alarms SET status = 'cancelled', updated_at = datetime('now') WHERE id = ?;`,
       [id],
     );
+    logAction('scheduled_alarms', id, 'CANCELLED', { status: existing?.status ?? 'unknown' }, { status: 'cancelled' });
     debugTrace('MarkScheduledAlarmCancelledEnd', {
       contactId,
       templateId,
@@ -234,6 +240,7 @@ export const markScheduledAlarmFired = (contactId, templateId) => {
       `UPDATE scheduled_alarms SET status = 'fired', updated_at = datetime('now') WHERE id = ?;`,
       [id],
     );
+    logAction('scheduled_alarms', id, 'FIRED', { status: existing?.status ?? 'unknown' }, { status: 'fired' });
     debugTrace('MarkScheduledAlarmFiredEnd', {
       contactId,
       templateId,
@@ -302,6 +309,8 @@ export const claimScheduledAlarmForFiring = (contactId, templateId) => {
     const after = db.execute('SELECT * FROM scheduled_alarms WHERE id = ?;', [id])
       .rows?._array?.[0] || null;
 
+    logAction('scheduled_alarms', id, 'CLAIMED', { status: before.status }, { status: 'firing' });
+
     debugTrace('ClaimScheduledAlarmEnd', { contactId, templateId, claimed: true });
     return { claimed: true, row: after };
   } catch (error) {
@@ -331,7 +340,11 @@ export const releaseScheduledAlarmClaim = (contactId, templateId) => {
     debugTrace('ReleaseScheduledAlarmClaim', {
       contactId, templateId, rowsAffected: result?.rowsAffected ?? 0,
     });
-    return (result?.rowsAffected ?? 0) > 0;
+    const released = (result?.rowsAffected ?? 0) > 0;
+    if (released) {
+      logAction('scheduled_alarms', id, 'RELEASED', { status: 'firing' }, { status: 'scheduled' });
+    }
+    return released;
   } catch (error) {
     debugTraceError('ReleaseScheduledAlarmClaimCatch', error, {
       function: 'releaseScheduledAlarmClaim', contactId, templateId,
@@ -383,6 +396,10 @@ export const cancelAllScheduledAlarmsForContact = (contactId) => {
       [contactId],
     );
 
+    for (const row of toCancel) {
+      logAction('scheduled_alarms', row.id, 'CANCELLED', { status: row.status }, { status: 'cancelled' });
+    }
+
     return toCancel;
   } catch (error) {
     handleError(error, 'cancelAllScheduledAlarmsForContact');
@@ -404,6 +421,10 @@ export const cancelAllScheduledAlarmsForTemplate = (templateId) => {
       [templateId],
     );
 
+    for (const row of toCancel) {
+      logAction('scheduled_alarms', row.id, 'CANCELLED', { status: row.status }, { status: 'cancelled' });
+    }
+
     return toCancel;
   } catch (error) {
     handleError(error, 'cancelAllScheduledAlarmsForTemplate');
@@ -416,6 +437,7 @@ export const deleteScheduledAlarm = (contactId, templateId) => {
     const db = getDB();
     const id = makeId(contactId, templateId);
     db.execute('DELETE FROM scheduled_alarms WHERE id = ?;', [id]);
+    logAction('scheduled_alarms', id, 'DELETE', null, null);
     return true;
   } catch (error) {
     handleError(error, 'deleteScheduledAlarm');

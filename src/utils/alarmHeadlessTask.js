@@ -1,5 +1,5 @@
 import { fireScheduledPair } from './alarmFireCore';
-import { getDueScheduledAlarms } from '../database/scheduledAlarmDB';
+import { scanDatabase } from './dbScan';
 import { recordEngineRun } from '../database/engineStatusDB';
 import { rearmAllScheduledAlarmsAfterBoot, scheduleAlarmsForContact } from './alarmScheduler';
 import { processQueue } from './queueProcessor';
@@ -44,8 +44,15 @@ export const RescheduleAlarmsTask = async () => {
  * SafetyNetTask — Level 1 / Active Queue (Micro Safety-Net).
  *
  * Triggered by ExpirySafetyNetWorker (native WorkManager, ~15 min cadence).
- * Reads scheduled_alarms directly for anything still 'scheduled' whose
- * trigger_at has already passed, and fires each one through the exact same
+ * Follows a strict scan-then-act pipeline: scanDatabase() is the ONE read
+ * step that observes current state (what's overdue, what's queued) — the
+ * same read layer the Test panel's Scan button and any future reporting
+ * use. This function never re-derives "what's due" with its own query;
+ * it acts only on exactly what scanDatabase() reported, so there is a
+ * single source of truth for "what's due right now" shared by every
+ * consumer, not a parallel computation that could drift from it.
+ *
+ * For each overdue row from the scan, fires it through the exact same
  * fireScheduledPair() path the exact-alarm receiver uses. No independent
  * rescan of contacts/templates, no separate grace-period rule — this was
  * the source of the silent-drop bug (overdue-by->1hr contacts were
@@ -62,20 +69,30 @@ export const SafetyNetTask = async () => {
   const traceId = generateTraceId('safetyNet');
   debugTrace('SafetyNetTaskStart', { traceId, status: 'starting' });
   try {
-    const dueRows = getDueScheduledAlarms();
-    debugTrace('SafetyNetTaskDueRows', { traceId, dueCount: dueRows.length });
+    // Step 1 — Scan: pure read, the single source of truth for "what's
+    // due right now." Nothing has happened yet at this point.
+    const scan = scanDatabase();
+    debugTrace('SafetyNetTaskScan', {
+      traceId,
+      scheduledCount: scan.summary.scheduledCount,
+      overdueCount: scan.summary.overdueCount,
+      pendingQueueCount: scan.summary.pendingQueueCount,
+    });
 
+    // Step 2 — Act: fire exactly the rows the scan identified as overdue.
     let processed = 0;
-    for (const row of dueRows) {
+    for (const row of scan.overdue) {
       const outcome = await fireScheduledPair(row.contact_id, row.template_id, traceId);
       if (outcome === 'fired') processed += 1;
     }
 
+    // Step 3 — Send/retry: flush anything still sitting PENDING in the
+    // queue (e.g. rate-limited earlier).
     await processQueue(undefined, traceId);
 
     recordEngineRun('safetyNet', { traceId, itemsProcessed: processed });
     debugTraceDuration('SafetyNetTaskEnd', startTime, {
-      traceId, outcome: 'completed', dueCount: dueRows.length, processed,
+      traceId, outcome: 'completed', dueCount: scan.overdue.length, processed,
     });
   } catch (error) {
     debugTraceError('SafetyNetTaskCatch', error, { traceId, function: 'SafetyNetTask' });
@@ -107,6 +124,20 @@ export const ReconcilerTask = async () => {
   const traceId = generateTraceId('reconciler');
   debugTrace('ReconcilerTaskStart', { traceId, status: 'starting' });
   try {
+    // Scan first (pure read) — same observation step SafetyNetTask starts
+    // with, logged here purely for visibility into state going into this
+    // run. Reconciler's own job (contact/template pair coverage) is a
+    // different concern than scheduled_alarms/queue state, so the scan
+    // result isn't used to decide what to do here — it's a snapshot for
+    // the trace log, not a gate.
+    const scan = scanDatabase();
+    debugTrace('ReconcilerTaskScan', {
+      traceId,
+      scheduledCount: scan.summary.scheduledCount,
+      overdueCount: scan.summary.overdueCount,
+      pendingQueueCount: scan.summary.pendingQueueCount,
+    });
+
     const contacts = getAllContacts();
     const templates = getActiveTemplates();
     debugTrace('ReconcilerTaskLoaded', { traceId, contactCount: contacts.length, templateCount: templates.length });
