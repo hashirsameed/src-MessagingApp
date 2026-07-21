@@ -16,6 +16,7 @@ import SettingsScreen from './src/screens/SettingsScreen';
 import WhatsAppConfigScreen from './src/screens/WhatsAppConfigScreen';
 import WhatsAppTemplatesScreen from './src/screens/WhatsAppTemplatesScreen';
 import DevTestScreen from './src/screens/DevTestScreen';
+import { testTransactionReturn } from './src/database/db';
 
 import {
   registerBackgroundScheduler,
@@ -28,9 +29,6 @@ const Tab = createBottomTabNavigator();
 
 const FOREGROUND_CHECK_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 
-// Background-trace notification — visible proof the engine keeps working
-// once the app leaves the foreground. Native side (AlarmModule) reads
-// scheduled_alarms directly, so no data needs to cross the bridge here.
 const { AlarmModule } = NativeModules;
 
 const showBackgroundTrace = () => {
@@ -102,8 +100,6 @@ function MainTabs() {
 
 export default function App() {
   const appState = useRef(AppState.currentState);
-
-  // ✅ Explicit type to avoid TypeScript error
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const triggerExpiryCheck = useCallback((source: string) => {
@@ -129,16 +125,17 @@ export default function App() {
     }
   }, []);
 
+  // TEMP DIAGNOSTIC — quick-sqlite transaction() sync/async check. Remove after logs captured.
+  useEffect(() => {
+    testTransactionReturn();
+  }, []);
+
   useEffect(() => {
     registerBackgroundScheduler();
 
-    // Run once at startup
     triggerExpiryCheck('startup');
-
-    // Start periodic checks while app is foregrounded
     startForegroundInterval();
 
-    // Permission onboarding (Android only)
     if (Platform.OS === 'android') {
       runPermissionOnboardingFlow();
     }

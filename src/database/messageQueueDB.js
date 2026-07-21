@@ -228,7 +228,7 @@ export const claimPendingQueue = (callerId = null) => {
     ).rows?._array ?? [];
 
     if (staleRows.length > 0) {
-      debugTrace('ClaimPendingQueueStaleProcessingFound', {
+        debugTrace('ClaimPendingQueueStaleProcessingFound', {
         callerId,
         staleCount: staleRows.length,
         staleIds: staleRows.map((r) => r.id).join(','),

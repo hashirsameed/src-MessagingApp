@@ -12,7 +12,7 @@ import {
 /** Directly inserts a queue row with a controllable created_at/status,
  * bypassing addToQueueDetailed's dedup rules — used to set up fixtures
  * that would be hard/impossible to reach through the public API alone
- * (e.g. a row that's been stuck in PROCESSING for 5 minutes). */
+ * (e.g. a row that's been stuck in CLAIMED for 5 minutes). */
 const insertRawQueueRow = ({ id, contactId, templateId, status, minutesAgo = 0 }) => {
   const db = getDB();
   db.execute(
@@ -28,15 +28,15 @@ const getRow = (id) => {
 };
 
 describe('claimPendingQueue', () => {
-  it('claims PENDING rows, moving them to PROCESSING and returning them', () => {
+  it('claims PENDING rows, moving them to CLAIMED and returning them', () => {
     insertRawQueueRow({ id: 'q1', contactId: 'c1', templateId: 't1', status: 'PENDING' });
     insertRawQueueRow({ id: 'q2', contactId: 'c2', templateId: 't1', status: 'PENDING' });
 
     const claimed = claimPendingQueue('run-1');
 
     expect(claimed.map((r) => r.id).sort()).toEqual(['q1', 'q2']);
-    expect(getRow('q1').status).toBe(QUEUE_STATUS.PROCESSING);
-    expect(getRow('q2').status).toBe(QUEUE_STATUS.PROCESSING);
+    expect(getRow('q1').status).toBe(QUEUE_STATUS.CLAIMED);
+    expect(getRow('q2').status).toBe(QUEUE_STATUS.CLAIMED);
   });
 
   it('does not touch rows that are already SENT or FAILED', () => {
@@ -50,13 +50,13 @@ describe('claimPendingQueue', () => {
     expect(getRow('q4').status).toBe('FAILED');
   });
 
-  describe('regression: stale PROCESSING rows (Problem 2 & 4 — resend of already-handled messages)', () => {
-    it('recovers a row stuck in PROCESSING for >2 minutes into FAILED, and does NOT return it for resending', () => {
-      // Simulates a previous run that claimed this row (PROCESSING) and
+  describe('regression: stale CLAIMED rows (Problem 2 & 4 — resend of already-handled messages)', () => {
+    it('recovers a row stuck in CLAIMED for >2 minutes into FAILED, and does NOT return it for resending', () => {
+      // Simulates a previous run that claimed this row (CLAIMED) and
       // then crashed/got killed before it could reach SENT or FAILED —
       // exactly what happened when the app was killed mid-send.
       insertRawQueueRow({
-        id: 'stuck-1', contactId: 'c5', templateId: 't1', status: 'PROCESSING', minutesAgo: 5,
+        id: 'stuck-1', contactId: 'c5', templateId: 't1', status: 'CLAIMED', minutesAgo: 5,
       });
       // A genuinely new item that should still be claimed normally.
       insertRawQueueRow({ id: 'fresh-1', contactId: 'c6', templateId: 't1', status: 'PENDING' });
@@ -69,22 +69,22 @@ describe('claimPendingQueue', () => {
       // visible in the Failed tab for a deliberate manual retry.
       const recovered = getRow('stuck-1');
       expect(recovered.status).toBe('FAILED');
-      expect(recovered.error_reason).toBe('STUCK_PROCESSING_TIMEOUT');
+      expect(recovered.error_reason).toBe('STUCK_CLAIMED_TIMEOUT');
 
       // The genuinely new item is unaffected and gets claimed as normal.
       expect(claimed.map((r) => r.id)).toContain('fresh-1');
-      expect(getRow('fresh-1').status).toBe(QUEUE_STATUS.PROCESSING);
+      expect(getRow('fresh-1').status).toBe(QUEUE_STATUS.CLAIMED);
     });
 
     it('does NOT recover a row that has only just started processing (well under the 2-minute threshold)', () => {
       insertRawQueueRow({
-        id: 'recent-processing', contactId: 'c7', templateId: 't1', status: 'PROCESSING', minutesAgo: 0,
+        id: 'recent-claimed', contactId: 'c7', templateId: 't1', status: 'CLAIMED', minutesAgo: 0,
       });
 
       claimPendingQueue('run-4');
 
       // Still legitimately in-flight — must be left alone, not force-failed.
-      expect(getRow('recent-processing').status).toBe('PROCESSING');
+      expect(getRow('recent-claimed').status).toBe('CLAIMED');
     });
 
     it('regression guard: demonstrates the OLD buggy query would have resent a stale PROCESSING row', () => {
@@ -97,9 +97,9 @@ describe('claimPendingQueue', () => {
       // select ALL rows currently PROCESSING, not just the ones just
       // claimed. Kept here only as a live regression check.
       const db = getDB();
-      db.execute(`UPDATE message_queue SET status = 'PROCESSING' WHERE status = 'PENDING';`);
+      db.execute(`UPDATE message_queue SET status = 'CLAIMED' WHERE status = 'PENDING';`);
       const oldBuggyResult = db.execute(
-        `SELECT * FROM message_queue WHERE status = 'PROCESSING' ORDER BY created_at ASC;`,
+        `SELECT * FROM message_queue WHERE status = 'CLAIMED' ORDER BY created_at ASC;`,
       ).rows._array;
 
       // The old query WOULD have handed back the stale row too — proving
@@ -111,7 +111,7 @@ describe('claimPendingQueue', () => {
       // Reset this probe's side effects, then confirm the REAL function
       // does not have this problem.
       db.execute(`UPDATE message_queue SET status = 'PENDING' WHERE id = 'fresh-old-bug';`);
-      db.execute(`UPDATE message_queue SET status = 'PROCESSING' WHERE id = 'stuck-old-bug';`);
+      db.execute(`UPDATE message_queue SET status = 'CLAIMED' WHERE id = 'stuck-old-bug';`);
 
       const claimed = claimPendingQueue('run-5');
       expect(claimed.map((r) => r.id)).not.toContain('stuck-old-bug');
@@ -125,7 +125,7 @@ describe('addToQueueDetailed dedup rules', () => {
     expect(result).toEqual({ added: true, reason: 'QUEUED' });
   });
 
-  it('refuses a duplicate while one is already PENDING/PROCESSING for the same pair', () => {
+  it('refuses a duplicate while one is already PENDING/CLAIMED for the same pair', () => {
     addToQueueDetailed('contact-b', 'template-b', 'sms');
     const second = addToQueueDetailed('contact-b', 'template-b', 'sms');
     expect(second).toEqual({ added: false, reason: 'ALREADY_PENDING' });

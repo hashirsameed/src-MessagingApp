@@ -13,9 +13,21 @@ import java.io.FileInputStream
 // break, but this MUST be a real keystore before publishing to Play Store.
 def keystorePropertiesFile = rootProject.file("keystore.properties")
 def keystoreProperties = new Properties()
-def hasReleaseKeystore = keystorePropertiesFile.exists()
-if (hasReleaseKeystore) {
+if (keystorePropertiesFile.exists()) {
     keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+}
+def releaseStoreFile = System.getenv('MYAPP_RELEASE_STORE_FILE') ?: keystoreProperties.getProperty('storeFile')
+def releaseStorePassword = System.getenv('MYAPP_RELEASE_STORE_PASSWORD') ?: keystoreProperties.getProperty('storePassword')
+def releaseKeyAlias = System.getenv('MYAPP_RELEASE_KEY_ALIAS') ?: keystoreProperties.getProperty('keyAlias')
+def releaseKeyPassword = System.getenv('MYAPP_RELEASE_KEY_PASSWORD') ?: keystoreProperties.getProperty('keyPassword')
+def hasReleaseSigning = [releaseStoreFile, releaseStorePassword, releaseKeyAlias, releaseKeyPassword].every { it?.trim() }
+def isReleaseTaskRequested = gradle.startParameter.taskNames.any { it.toLowerCase().contains('release') }
+
+if (isReleaseTaskRequested && !hasReleaseSigning) {
+    throw new GradleException('Release signing is required. Set MYAPP_RELEASE_STORE_FILE, MYAPP_RELEASE_STORE_PASSWORD, MYAPP_RELEASE_KEY_ALIAS, and MYAPP_RELEASE_KEY_PASSWORD, or provide android/keystore.properties.')
+}
+if (isReleaseTaskRequested && !rootProject.file(releaseStoreFile).exists()) {
+    throw new GradleException("Release keystore does not exist: ${releaseStoreFile}")
 }
 
 /**
@@ -108,12 +120,12 @@ android {
             keyAlias 'androiddebugkey'
             keyPassword 'android'
         }
-        if (hasReleaseKeystore) {
+        if (hasReleaseSigning) {
             release {
-                storeFile rootProject.file(keystoreProperties['storeFile'])
-                storePassword keystoreProperties['storePassword']
-                keyAlias keystoreProperties['keyAlias']
-                keyPassword keystoreProperties['keyPassword']
+                storeFile rootProject.file(releaseStoreFile)
+                storePassword releaseStorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
             }
         }
     }
@@ -126,7 +138,7 @@ android {
             // when present. IMPORTANT: before publishing to the Play
             // Store, generate a real keystore — do not ship a build signed
             // with the debug keystore.
-            signingConfig hasReleaseKeystore ? signingConfigs.release : signingConfigs.debug
+            signingConfig hasReleaseSigning ? signingConfigs.release : signingConfigs.debug
             minifyEnabled enableProguardInReleaseBuilds
             proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"
         }

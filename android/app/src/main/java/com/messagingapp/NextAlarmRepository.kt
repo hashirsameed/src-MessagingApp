@@ -63,13 +63,17 @@ object NextAlarmRepository {
                 dbFile.absolutePath, null, SQLiteDatabase.OPEN_READONLY,
             )
             db.use {
+                // scheduled_alarms only stores queue_id now — contact_id/
+                // template_id live on message_queue, so this is a
+                // double-JOIN, not a direct join like before the redesign.
                 val cursor = it.rawQuery(
                     """
                     SELECT c.name AS contact_name, t.title AS template_title, sa.trigger_at AS trigger_at,
                            (sa.trigger_at <= datetime('now')) AS is_overdue
                     FROM scheduled_alarms sa
-                    JOIN contacts c ON c.id = sa.contact_id
-                    JOIN templates t ON t.id = sa.template_id
+                    JOIN message_queue mq ON mq.id = sa.queue_id
+                    JOIN contacts c ON c.id = mq.contact_id
+                    JOIN templates t ON t.id = mq.template_id
                     WHERE sa.status = 'scheduled'
                     ORDER BY sa.trigger_at ASC
                     LIMIT 1;
@@ -104,6 +108,9 @@ object NextAlarmRepository {
      * for it, so the notification silently said nothing about the backlog.
      * Returns 0 if the DB isn't reachable rather than throwing, since this
      * is a "nice to have" count, not the primary notification content.
+     *
+     * Unchanged by the redesign — message_queue's own columns/status
+     * values didn't move, only scheduled_alarms did.
      */
     fun queryPendingCount(context: Context): Int {
         val dbFile = resolveDbFile(context) ?: return 0

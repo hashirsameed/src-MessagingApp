@@ -3,92 +3,72 @@ import { handleError } from '../utils/errorHandler';
 import { debugTrace, debugTraceDbWrite, debugTraceError } from '../utils/debugTrace';
 import { logAction } from './auditLogDB';
 
-const makeId = (contactId, templateId) => `${contactId}_${templateId}`;
+const findLatestAlarm = (db, contactId, templateId) => db.execute(
+  `SELECT sa.*, mq.contact_id, mq.template_id, mq.scheduled_for, mq.status AS queue_status
+   FROM scheduled_alarms sa JOIN message_queue mq ON mq.id = sa.queue_id
+   WHERE mq.contact_id = ? AND mq.template_id = ? ORDER BY sa.created_at DESC LIMIT 1;`,
+  [contactId, templateId],
+).rows?._array?.[0] || null;
 
-/**
- * Point 8 — Alarm schedule count sanity check. Logs how many scheduled_alarms
- * rows currently exist for this contact and for this template AFTER an
- * upsert. Since the UNIQUE(contact_id, template_id) constraint should make
- * exactly one row per pair impossible to duplicate, seeing more than the
- * expected count here (e.g. contactAlarmCount higher than active-template
- * count) is a direct signal something is wrong upstream — without this,
- * a silent double-schedule would only surface as a duplicate SMS days later.
- */
-const logAlarmCounts = (db, contactId, templateId) => {
-  const contactCount = db.execute(
-    `SELECT COUNT(*) as count FROM scheduled_alarms WHERE contact_id = ? AND status = 'scheduled';`,
-    [contactId],
-  ).rows?._array?.[0]?.count ?? 0;
-
-  const templateCount = db.execute(
-    `SELECT COUNT(*) as count FROM scheduled_alarms WHERE template_id = ? AND status = 'scheduled';`,
-    [templateId],
-  ).rows?._array?.[0]?.count ?? 0;
-
-  debugTrace('AlarmScheduleCountCheck', {
-    contactId,
-    templateId,
-    activeAlarmsForContact: contactCount,
-    activeAlarmsForTemplate: templateCount,
-  });
-};
-
-export const upsertScheduledAlarm = (contactId, templateId, requestCode, triggerAtISO) => {
+export const upsertScheduledAlarm = (contactId, templateId, requestCode, triggerAtISO, platformId = 'sms') => {
   debugTrace('UpsertScheduledAlarmStart', { contactId, templateId, requestCode, triggerAtISO });
   try {
     const db = getDB();
-    const id = makeId(contactId, templateId);
 
-    const existing = db.execute('SELECT status FROM scheduled_alarms WHERE id = ?;', [id])
-      .rows?._array?.[0];
+    const active = db.execute(
+      `SELECT * FROM message_queue WHERE contact_id=? AND template_id=? AND status IN ('PENDING','CLAIMED')
+       ORDER BY created_at DESC LIMIT 1;`,
+      [contactId, templateId],
+    ).rows?._array?.[0] || null;
 
-    debugTraceDbWrite('UpsertScheduledAlarmWrite', {
-      table: 'scheduled_alarms',
-      pk: id,
-      oldState: existing?.status ?? 'none',
-      newState: 'scheduled',
-      contactId,
-      templateId,
-      requestCode,
-      triggerAtISO,
-    });
+    if (active?.scheduled_for === triggerAtISO) {
+      debugTrace('UpsertScheduledAlarmNoOp', { contactId, templateId, triggerAtISO });
+      return true;
+    }
 
-    // status only resets to 'scheduled' when this is genuinely a new cycle
-    // (trigger_at actually changed). If trigger_at is identical to what's
-    // already stored and the row is 'fired'/'firing', a reschedule pass
-    // (template edit/create, contact add) must NOT resurrect an alarm that
-    // already sent — that was silently reviving already-sent pairs and
-    // causing the duplicate-send-minutes-later bug.
+    if (active) {
+      db.execute(`DELETE FROM message_queue WHERE id = ?;`, [active.id]);
+      logAction('message_queue', active.id, 'DELETE', { status: active.status, scheduled_for: active.scheduled_for }, null);
+    }
+
+    const lastResolved = db.execute(
+      `SELECT sa.status, sa.trigger_at FROM scheduled_alarms sa
+       JOIN message_queue mq ON mq.id = sa.queue_id
+       WHERE mq.contact_id=? AND mq.template_id=? ORDER BY sa.created_at DESC LIMIT 1;`,
+      [contactId, templateId],
+    ).rows?._array?.[0] || null;
+
+    if (lastResolved?.status === 'fired' && lastResolved.trigger_at === triggerAtISO) {
+      debugTrace('UpsertScheduledAlarmSkipAlreadyFired', { contactId, templateId, triggerAtISO });
+      return true;
+    }
+
+    const queueId = `q_${contactId}_${templateId}_${Date.now()}`;
+    debugTraceDbWrite('UpsertScheduledAlarmWrite', { table: 'message_queue', pk: queueId, oldState: 'none', newState: 'PENDING', contactId, templateId });
+
+    try {
+      db.execute(
+        `INSERT INTO message_queue (id, contact_id, template_id, platform_id, status, scheduled_for)
+         VALUES (?, ?, ?, ?, 'PENDING', ?);`,
+        [queueId, contactId, templateId, platformId, triggerAtISO],
+      );
+    } catch (raceError) {
+      debugTrace('UpsertScheduledAlarmRaceLost', { contactId, templateId, triggerAtISO, error: String(raceError) });
+      return true;
+    }
+
+    logAction('message_queue', queueId, 'INSERT', null, { contact_id: contactId, template_id: templateId, scheduled_for: triggerAtISO, status: 'PENDING' });
+
     db.execute(
-      `
-      INSERT INTO scheduled_alarms (id, contact_id, template_id, request_code, trigger_at, status, updated_at)
-      VALUES (?, ?, ?, ?, ?, 'scheduled', datetime('now'))
-      ON CONFLICT(id) DO UPDATE SET
-        request_code = excluded.request_code,
-        trigger_at   = excluded.trigger_at,
-        status       = CASE
-                          WHEN status IN ('fired', 'firing')
-                               AND trigger_at = excluded.trigger_at
-                          THEN status
-                          ELSE 'scheduled'
-                        END,
-        updated_at   = datetime('now');
-      `,
-      [id, contactId, templateId, requestCode, triggerAtISO],
+      `INSERT INTO scheduled_alarms (queue_id, request_code, trigger_at, status) VALUES (?, ?, ?, 'scheduled');`,
+      [queueId, requestCode, triggerAtISO],
     );
+    logAction('scheduled_alarms', queueId, 'INSERT', null, { trigger_at: triggerAtISO, request_code: requestCode });
 
-    logAlarmCounts(db, contactId, templateId);
-
-    logAction('scheduled_alarms', id, 'UPSERT',
-      existing ? { status: existing.status } : null,
-      { status: 'scheduled_or_preserved', trigger_at: triggerAtISO, request_code: requestCode });
-
-    debugTrace('UpsertScheduledAlarmEnd', { contactId, templateId, requestCode, pk: id });
+    debugTrace('UpsertScheduledAlarmEnd', { contactId, templateId, requestCode, queueId });
     return true;
   } catch (error) {
-    debugTraceError('UpsertScheduledAlarmCatch', error, {
-      function: 'upsertScheduledAlarm', contactId, templateId, requestCode,
-    });
+    debugTraceError('UpsertScheduledAlarmCatch', error, { function: 'upsertScheduledAlarm', contactId, templateId });
     handleError(error, 'upsertScheduledAlarm');
     return false;
   }
@@ -96,26 +76,8 @@ export const upsertScheduledAlarm = (contactId, templateId, requestCode, trigger
 
 export const getScheduledAlarm = (contactId, templateId) => {
   try {
-    const db = getDB();
-    const id = makeId(contactId, templateId);
-    const result = db.execute('SELECT * FROM scheduled_alarms WHERE id = ?;', [id]);
-    const row = result.rows?._array?.[0] || null;
-    debugTrace('GetScheduledAlarm', {
-      contactId,
-      templateId,
-      pk: id,
-      found: !!row,
-      status: row?.status ?? 'not_found',
-      triggerAt: row?.trigger_at ?? '',
-      requestCode: row?.request_code ?? '',
-    });
-    return row;
+    return findLatestAlarm(getDB(), contactId, templateId);
   } catch (error) {
-    debugTraceError('GetScheduledAlarmCatch', error, {
-      function: 'getScheduledAlarm',
-      contactId,
-      templateId,
-    });
     handleError(error, 'getScheduledAlarm');
     return null;
   }
@@ -123,9 +85,10 @@ export const getScheduledAlarm = (contactId, templateId) => {
 
 export const getScheduledAlarmsByContact = (contactId) => {
   try {
-    const db = getDB();
-    const result = db.execute(
-      'SELECT * FROM scheduled_alarms WHERE contact_id = ?;',
+    const result = getDB().execute(
+      `SELECT sa.*, mq.contact_id, mq.template_id, mq.scheduled_for, mq.status AS queue_status
+       FROM scheduled_alarms sa JOIN message_queue mq ON mq.id = sa.queue_id
+       WHERE mq.contact_id = ? ORDER BY sa.trigger_at ASC;`,
       [contactId],
     );
     return result.rows?._array || [];
@@ -137,9 +100,10 @@ export const getScheduledAlarmsByContact = (contactId) => {
 
 export const getScheduledAlarmsByTemplate = (templateId) => {
   try {
-    const db = getDB();
-    const result = db.execute(
-      'SELECT * FROM scheduled_alarms WHERE template_id = ?;',
+    const result = getDB().execute(
+      `SELECT sa.*, mq.contact_id, mq.template_id, mq.scheduled_for, mq.status AS queue_status
+       FROM scheduled_alarms sa JOIN message_queue mq ON mq.id = sa.queue_id
+       WHERE mq.template_id = ? ORDER BY sa.trigger_at ASC;`,
       [templateId],
     );
     return result.rows?._array || [];
@@ -151,9 +115,10 @@ export const getScheduledAlarmsByTemplate = (templateId) => {
 
 export const getAllActiveScheduledAlarms = () => {
   try {
-    const db = getDB();
-    const result = db.execute(
-      `SELECT * FROM scheduled_alarms WHERE status = 'scheduled' ORDER BY trigger_at ASC;`,
+    const result = getDB().execute(
+      `SELECT sa.id, sa.queue_id, sa.request_code, sa.trigger_at, sa.status, mq.contact_id, mq.template_id
+       FROM scheduled_alarms sa JOIN message_queue mq ON mq.id = sa.queue_id
+       WHERE sa.status = 'scheduled' ORDER BY sa.trigger_at ASC;`,
     );
     return result.rows?._array || [];
   } catch (error) {
@@ -162,20 +127,12 @@ export const getAllActiveScheduledAlarms = () => {
   }
 };
 
-/**
- * getDueScheduledAlarms — Level 1 (Active Queue / Micro Safety-Net) source.
- * Every row still 'scheduled' whose trigger_at has already passed. This is
- * the same status/table AlarmFiredTask itself operates on — no separate
- * rescan-and-filter logic, no independent grace-period rule. Reuses
- * idx_scheduled_alarms_status.
- */
 export const getDueScheduledAlarms = () => {
   try {
-    const db = getDB();
-    const result = db.execute(
-      `SELECT * FROM scheduled_alarms
-       WHERE status = 'scheduled' AND trigger_at <= datetime('now')
-       ORDER BY trigger_at ASC;`,
+    const result = getDB().execute(
+      `SELECT sa.id, sa.queue_id, sa.request_code, sa.trigger_at, sa.status, mq.contact_id, mq.template_id
+       FROM scheduled_alarms sa JOIN message_queue mq ON mq.id = sa.queue_id
+       WHERE sa.status = 'scheduled' AND sa.trigger_at <= datetime('now') ORDER BY sa.trigger_at ASC;`,
     );
     return result.rows?._array || [];
   } catch (error) {
@@ -184,196 +141,95 @@ export const getDueScheduledAlarms = () => {
   }
 };
 
-export const markScheduledAlarmCancelled = (contactId, templateId) => {
-  debugTrace('MarkScheduledAlarmCancelledStart', { contactId, templateId });
+const updateAlarmStatus = (contactId, templateId, fromStatuses, toStatus, action) => {
   try {
     const db = getDB();
-    const id = makeId(contactId, templateId);
-    const existing = db.execute('SELECT status FROM scheduled_alarms WHERE id = ?;', [id])
-      .rows?._array?.[0];
-    debugTraceDbWrite('MarkScheduledAlarmCancelledUpdate', {
-      table: 'scheduled_alarms',
-      pk: id,
-      oldState: existing?.status ?? 'unknown',
-      newState: 'cancelled',
-      contactId,
-      templateId,
-    });
-    db.execute(
-      `UPDATE scheduled_alarms SET status = 'cancelled', updated_at = datetime('now') WHERE id = ?;`,
-      [id],
-    );
-    logAction('scheduled_alarms', id, 'CANCELLED', { status: existing?.status ?? 'unknown' }, { status: 'cancelled' });
-    debugTrace('MarkScheduledAlarmCancelledEnd', {
-      contactId,
-      templateId,
-      status: 'cancelled',
-    });
+    const placeholders = fromStatuses.map(() => '?').join(',');
+    const row = db.execute(
+      `SELECT sa.id, sa.status FROM scheduled_alarms sa JOIN message_queue mq ON mq.id = sa.queue_id
+       WHERE mq.contact_id = ? AND mq.template_id = ? AND sa.status IN (${placeholders})
+       ORDER BY sa.created_at DESC LIMIT 1;`,
+      [contactId, templateId, ...fromStatuses],
+    ).rows?._array?.[0];
+
+    if (!row) return false;
+
+    debugTraceDbWrite(`${action}Update`, { table: 'scheduled_alarms', pk: row.id, oldState: row.status, newState: toStatus, contactId, templateId });
+    db.execute(`UPDATE scheduled_alarms SET status = ?, updated_at = datetime('now') WHERE id = ?;`, [toStatus, row.id]);
+    logAction('scheduled_alarms', String(row.id), action, { status: row.status }, { status: toStatus });
     return true;
   } catch (error) {
-    debugTraceError('MarkScheduledAlarmCancelledCatch', error, {
-      function: 'markScheduledAlarmCancelled',
-      contactId,
-      templateId,
-    });
-    handleError(error, 'markScheduledAlarmCancelled');
+    debugTraceError(`${action}Catch`, error, { function: action, contactId, templateId });
+    handleError(error, action);
     return false;
   }
 };
 
-export const markScheduledAlarmFired = (contactId, templateId) => {
-  debugTrace('MarkScheduledAlarmFiredStart', { contactId, templateId });
-  try {
-    const db = getDB();
-    const id = makeId(contactId, templateId);
-    const existing = db.execute('SELECT status FROM scheduled_alarms WHERE id = ?;', [id])
-      .rows?._array?.[0];
-    debugTraceDbWrite('MarkScheduledAlarmFiredUpdate', {
-      table: 'scheduled_alarms',
-      pk: id,
-      oldState: existing?.status ?? 'unknown',
-      newState: 'fired',
-      contactId,
-      templateId,
-    });
-    db.execute(
-      `UPDATE scheduled_alarms SET status = 'fired', updated_at = datetime('now') WHERE id = ?;`,
-      [id],
-    );
-    logAction('scheduled_alarms', id, 'FIRED', { status: existing?.status ?? 'unknown' }, { status: 'fired' });
-    debugTrace('MarkScheduledAlarmFiredEnd', {
-      contactId,
-      templateId,
-      status: 'fired',
-    });
-    return true;
-  } catch (error) {
-    debugTraceError('MarkScheduledAlarmFiredCatch', error, {
-      function: 'markScheduledAlarmFired',
-      contactId,
-      templateId,
-    });
-    handleError(error, 'markScheduledAlarmFired');
-    return false;
-  }
-};
+export const markScheduledAlarmCancelled = (contactId, templateId) =>
+  updateAlarmStatus(contactId, templateId, ['scheduled', 'firing'], 'cancelled', 'CANCELLED');
 
-/**
- * claimScheduledAlarmForFiring — atomic CAS guard.
- *
- * Single gatekeeper every trigger source (AlarmReceiver, ExpirySafetyNetWorker,
- * BootReceiver-driven reschedule) must pass through before touching
- * messageQueueDB. The UPDATE only succeeds if the row is still 'scheduled'
- * at the moment of the call. Returns { claimed, row }.
- */
+export const markScheduledAlarmFired = (contactId, templateId) =>
+  updateAlarmStatus(contactId, templateId, ['scheduled', 'firing'], 'fired', 'FIRED');
+
 export const claimScheduledAlarmForFiring = (contactId, templateId) => {
   debugTrace('ClaimScheduledAlarmStart', { contactId, templateId });
   try {
     const db = getDB();
-    const id = makeId(contactId, templateId);
-
-    const before = db.execute('SELECT * FROM scheduled_alarms WHERE id = ?;', [id])
-      .rows?._array?.[0] || null;
-
-    if (!before) {
-      debugTrace('ClaimScheduledAlarmMiss', { contactId, templateId, reason: 'row_not_found' });
-      return { claimed: false, row: null };
-    }
+    const before = findLatestAlarm(db, contactId, templateId);
+    if (!before) return { claimed: false, row: null };
 
     const result = db.execute(
-      `UPDATE scheduled_alarms
-       SET status = 'firing', updated_at = datetime('now')
-       WHERE id = ? AND status = 'scheduled';`,
-      [id],
+      `UPDATE scheduled_alarms SET status = 'firing', updated_at = datetime('now') WHERE id = ? AND status = 'scheduled';`,
+      [before.id],
     );
+    const claimed = (result?.rowsAffected ?? 0) > 0;
 
-    const rowsAffected = result?.rowsAffected ?? 0;
+    debugTraceDbWrite('ClaimScheduledAlarmCAS', { table: 'scheduled_alarms', pk: before.id, oldState: before.status, newState: claimed ? 'firing' : before.status, contactId, templateId });
 
-    debugTraceDbWrite('ClaimScheduledAlarmCAS', {
-      table: 'scheduled_alarms',
-      pk: id,
-      oldState: before.status,
-      newState: rowsAffected > 0 ? 'firing' : before.status,
-      rowsAffected,
-      contactId,
-      templateId,
-    });
+    if (!claimed) return { claimed: false, row: before };
 
-    if (rowsAffected === 0) {
-      debugTrace('ClaimScheduledAlarmSkip', {
-        contactId, templateId, reason: 'already_claimed_or_not_scheduled', currentStatus: before.status,
-      });
-      return { claimed: false, row: before };
-    }
-
-    const after = db.execute('SELECT * FROM scheduled_alarms WHERE id = ?;', [id])
-      .rows?._array?.[0] || null;
-
-    logAction('scheduled_alarms', id, 'CLAIMED', { status: before.status }, { status: 'firing' });
-
-    debugTrace('ClaimScheduledAlarmEnd', { contactId, templateId, claimed: true });
-    return { claimed: true, row: after };
+    logAction('scheduled_alarms', String(before.id), 'CLAIMED', { status: before.status }, { status: 'firing' });
+    return { claimed: true, row: { ...before, status: 'firing', contact_id: contactId, template_id: templateId } };
   } catch (error) {
-    debugTraceError('ClaimScheduledAlarmCatch', error, {
-      function: 'claimScheduledAlarmForFiring', contactId, templateId,
-    });
+    debugTraceError('ClaimScheduledAlarmCatch', error, { function: 'claimScheduledAlarmForFiring', contactId, templateId });
     handleError(error, 'claimScheduledAlarmForFiring');
     return { claimed: false, row: null };
   }
 };
 
-/**
- * releaseScheduledAlarmClaim — reverts a 'firing' claim back to 'scheduled'.
- * Only used when a claimed alarm fails to queue for a transient reason
- * (DB error, etc.) so the safety-net worker can retry it later instead of
- * the row being stuck permanently in 'firing'.
- */
 export const releaseScheduledAlarmClaim = (contactId, templateId) => {
   try {
     const db = getDB();
-    const id = makeId(contactId, templateId);
+    const row = db.execute(
+      `SELECT sa.id FROM scheduled_alarms sa JOIN message_queue mq ON mq.id = sa.queue_id
+       WHERE mq.contact_id = ? AND mq.template_id = ? AND sa.status = 'firing' ORDER BY sa.created_at DESC LIMIT 1;`,
+      [contactId, templateId],
+    ).rows?._array?.[0];
+    if (!row) return false;
+
     const result = db.execute(
-      `UPDATE scheduled_alarms SET status = 'scheduled', updated_at = datetime('now')
-       WHERE id = ? AND status = 'firing';`,
-      [id],
+      `UPDATE scheduled_alarms SET status = 'scheduled', updated_at = datetime('now') WHERE id = ? AND status = 'firing';`,
+      [row.id],
     );
-    debugTrace('ReleaseScheduledAlarmClaim', {
-      contactId, templateId, rowsAffected: result?.rowsAffected ?? 0,
-    });
     const released = (result?.rowsAffected ?? 0) > 0;
-    if (released) {
-      logAction('scheduled_alarms', id, 'RELEASED', { status: 'firing' }, { status: 'scheduled' });
-    }
+    if (released) logAction('scheduled_alarms', String(row.id), 'RELEASED', { status: 'firing' }, { status: 'scheduled' });
     return released;
   } catch (error) {
-    debugTraceError('ReleaseScheduledAlarmClaimCatch', error, {
-      function: 'releaseScheduledAlarmClaim', contactId, templateId,
-    });
+    debugTraceError('ReleaseScheduledAlarmClaimCatch', error, { function: 'releaseScheduledAlarmClaim', contactId, templateId });
     handleError(error, 'releaseScheduledAlarmClaim');
     return false;
   }
 };
 
-/**
- * getNextUpcomingAlarm — read-only, part of the engine's published UI
- * interface. Used by notification builder, widget (Kotlin mirrors this
- * same query independently), and Settings/status screens. Never call from
- * write paths.
- */
 export const getNextUpcomingAlarm = () => {
   try {
-    const db = getDB();
-    const result = db.execute(
-      `
-      SELECT sa.contact_id, sa.template_id, sa.trigger_at,
-             c.name AS contact_name, t.title AS template_title
-      FROM scheduled_alarms sa
-      JOIN contacts c ON c.id = sa.contact_id
-      JOIN templates t ON t.id = sa.template_id
-      WHERE sa.status = 'scheduled'
-      ORDER BY sa.trigger_at ASC
-      LIMIT 1;
-      `,
+    const result = getDB().execute(
+      `SELECT mq.contact_id, mq.template_id, sa.trigger_at, c.name AS contact_name, t.title AS template_title
+       FROM scheduled_alarms sa
+       JOIN message_queue mq ON mq.id = sa.queue_id
+       JOIN contacts c ON c.id = mq.contact_id
+       JOIN templates t ON t.id = mq.template_id
+       WHERE sa.status = 'scheduled' ORDER BY sa.trigger_at ASC LIMIT 1;`,
     );
     return result.rows?._array?.[0] || null;
   } catch (error) {
@@ -382,62 +238,42 @@ export const getNextUpcomingAlarm = () => {
   }
 };
 
-export const cancelAllScheduledAlarmsForContact = (contactId) => {
+const cancelAllScheduledAlarmsBy = (column, value) => {
   try {
     const db = getDB();
     const toCancel = db.execute(
-      `SELECT * FROM scheduled_alarms WHERE contact_id = ? AND status = 'scheduled';`,
-      [contactId],
+      `SELECT sa.* FROM scheduled_alarms sa JOIN message_queue mq ON mq.id = sa.queue_id
+       WHERE mq.${column} = ? AND sa.status = 'scheduled';`,
+      [value],
     ).rows?._array || [];
 
-    db.execute(
-      `UPDATE scheduled_alarms SET status = 'cancelled', updated_at = datetime('now')
-       WHERE contact_id = ? AND status = 'scheduled';`,
-      [contactId],
-    );
-
-    for (const row of toCancel) {
-      logAction('scheduled_alarms', row.id, 'CANCELLED', { status: row.status }, { status: 'cancelled' });
+    if (toCancel.length) {
+      const placeholders = toCancel.map(() => '?').join(',');
+      db.execute(`UPDATE scheduled_alarms SET status = 'cancelled', updated_at = datetime('now') WHERE id IN (${placeholders});`, toCancel.map((r) => r.id));
     }
-
+    toCancel.forEach((row) => logAction('scheduled_alarms', String(row.id), 'CANCELLED', { status: row.status }, { status: 'cancelled' }));
     return toCancel;
   } catch (error) {
-    handleError(error, 'cancelAllScheduledAlarmsForContact');
+    handleError(error, `cancelAllScheduledAlarmsBy_${column}`);
     return [];
   }
 };
 
-export const cancelAllScheduledAlarmsForTemplate = (templateId) => {
-  try {
-    const db = getDB();
-    const toCancel = db.execute(
-      `SELECT * FROM scheduled_alarms WHERE template_id = ? AND status = 'scheduled';`,
-      [templateId],
-    ).rows?._array || [];
-
-    db.execute(
-      `UPDATE scheduled_alarms SET status = 'cancelled', updated_at = datetime('now')
-       WHERE template_id = ? AND status = 'scheduled';`,
-      [templateId],
-    );
-
-    for (const row of toCancel) {
-      logAction('scheduled_alarms', row.id, 'CANCELLED', { status: row.status }, { status: 'cancelled' });
-    }
-
-    return toCancel;
-  } catch (error) {
-    handleError(error, 'cancelAllScheduledAlarmsForTemplate');
-    return [];
-  }
-};
+export const cancelAllScheduledAlarmsForContact = (contactId) => cancelAllScheduledAlarmsBy('contact_id', contactId);
+export const cancelAllScheduledAlarmsForTemplate = (templateId) => cancelAllScheduledAlarmsBy('template_id', templateId);
 
 export const deleteScheduledAlarm = (contactId, templateId) => {
   try {
     const db = getDB();
-    const id = makeId(contactId, templateId);
-    db.execute('DELETE FROM scheduled_alarms WHERE id = ?;', [id]);
-    logAction('scheduled_alarms', id, 'DELETE', null, null);
+    const row = db.execute(
+      `SELECT sa.id FROM scheduled_alarms sa JOIN message_queue mq ON mq.id = sa.queue_id
+       WHERE mq.contact_id = ? AND mq.template_id = ? ORDER BY sa.created_at DESC LIMIT 1;`,
+      [contactId, templateId],
+    ).rows?._array?.[0];
+    if (!row) return true;
+
+    db.execute(`DELETE FROM scheduled_alarms WHERE id = ?;`, [row.id]);
+    logAction('scheduled_alarms', String(row.id), 'DELETE', null, null);
     return true;
   } catch (error) {
     handleError(error, 'deleteScheduledAlarm');
