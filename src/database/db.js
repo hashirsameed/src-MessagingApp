@@ -132,11 +132,11 @@ export const getDB = () => {
     // intent) — every Scan will text these numbers for real.
     try {
       const testContacts = [
-        { id: 'seed_test_contact_01', name: 'Hashir',        phone_number: '03102697154', expiry_datetime: '2026-07-18T09:00:00Z' },
-        { id: 'seed_test_contact_02', name: 'Hashir Sameed', phone_number: '03422900148', expiry_datetime: '2026-07-25T09:00:00Z' },
-        { id: 'seed_test_contact_03', name: 'Auon Bhai',     phone_number: '03172002094', expiry_datetime: '2026-08-30T09:00:00Z' },
-        { id: 'seed_test_contact_04', name: 'Ayesha',        phone_number: '03453035685', expiry_datetime: '2026-08-18T09:00:00Z' },
-        { id: 'seed_test_contact_05', name: 'Hussain',       phone_number: '03132988120', expiry_datetime: '2026-06-18T09:00:00Z' },
+        { id: 'seed_test_contact_01', name: 'Hashir',        phone_number: '', expiry_datetime: '2026-07-18T09:00:00Z' },
+        { id: 'seed_test_contact_02', name: 'Hashir Sameed', phone_number: '', expiry_datetime: '2026-07-25T09:00:00Z' },
+        { id: 'seed_test_contact_03', name: 'Auon Bhai',     phone_number: '', expiry_datetime: '2026-08-30T09:00:00Z' },
+        { id: 'seed_test_contact_04', name: 'Ayesha',        phone_number: '', expiry_datetime: '2026-08-18T09:00:00Z' },
+        { id: 'seed_test_contact_05', name: 'Hussain',       phone_number: '', expiry_datetime: '2026-06-18T09:00:00Z' },
       ];
 
       for (const c of testContacts) {
