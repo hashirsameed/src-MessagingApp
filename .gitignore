@@ -79,3 +79,6 @@ yarn-error.log
 !.yarn/releases
 !.yarn/sdks
 !.yarn/versions
+
+# Local-only QA seed data — real personal names/phone numbers, never push
+src/database/seedContacts.js
