@@ -1,6 +1,6 @@
 import { Platform, NativeModules } from 'react-native';
 import {
-  claimPendingQueue, markAsSent, markAsFailed, revertToPending,
+  claimPendingQueue, markAsSent, markAsFailed, revertToPending, getQueueRowById,
 } from '../database/messageQueueDB';
 import { getAllContacts } from '../database/contactDB';
 import { getAllTemplates } from '../database/templateDB';
@@ -10,18 +10,11 @@ import { getDaysUntilExpiry, personalizeMessage } from './templateMatcher';
 import { handleError } from './errorHandler';
 import { debugTrace, debugTraceError, debugTraceDuration, generateTraceId } from './debugTrace';
 import { getAdapter } from '../platforms/registry';
-import { requestSmsPermission } from '../platforms/localTextAdapter'; // also self-registers 'local_text'
-import { isConfigured as hasWhatsAppCredentials } from '../platforms/whatsappAdapter'; // also self-registers 'managed_remote'
+import { requestSmsPermission } from '../platforms/localTextAdapter';
+import { isConfigured as hasWhatsAppCredentials } from '../platforms/whatsappAdapter';
 
 const { AlarmModule } = NativeModules;
 
-// scheduleAlarm/cancelAlarm (alarmScheduler.js) already call this after
-// their own SQLite writes land — same reasoning applies here: a send
-// changes which contact/template is "next" (this one is done, the next
-// pending one becomes the new "next"), so the persistent notification and
-// home-screen widget need the same nudge after a queue run actually
-// changes state. Missing this call was why "Next: X at Y" kept showing a
-// stale entry after X's message had already gone out.
 const refreshReminderSurfacesIfChanged = (summary) => {
   if (Platform.OS !== 'android') return;
   if (!AlarmModule?.refreshReminderSurfaces) return;
@@ -39,14 +32,8 @@ export const FIXED_PLATFORMS = [
 ];
 
 const SMS_INTRA_SEND_DELAY_MS = 3500;
-
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Registry-routed dispatch — looks up the adapter by platform_type and hands
-// off. Both adapters accept the same combined ctx and pick what they need
-// (local_text reads smsPermissionGranted, managed_remote reads waConfigured),
-// so this function stays platform-agnostic. Result vocabulary unchanged:
-// 'sent' | 'opened' | 'failed_<REASON>'.
 const dispatchItem = async (platform, contact, message, smsPermissionGranted, waConfigured, traceContext = {}, template = null) => {
   debugTrace('DispatchItemStart', {
     ...traceContext,
@@ -60,18 +47,6 @@ const dispatchItem = async (platform, contact, message, smsPermissionGranted, wa
   return adapter.dispatch(platform, contact, message, { smsPermissionGranted, waConfigured, traceContext, template });
 };
 
-// ---------------------------------------------------------------------------
-// Main export
-//
-// Signature stays BACKWARD-COMPATIBLE with any existing caller that does
-// `processQueue(someProgressCallback)` (e.g. a manual "Process Queue"
-// button in QueueScreen.js) — onProgress is still the FIRST parameter.
-// parentTraceId is a NEW second parameter: when a caller (like
-// AlarmFiredTask) already has a traceId from its own execution, it links
-// this run's logs to that parent trace. If omitted, processQueue()
-// generates its own traceId so every run — manual, foreground-interval,
-// or alarm-triggered — is still uniquely identifiable in the logs.
-// ---------------------------------------------------------------------------
 export const processQueue = async (onProgress, parentTraceId = null) => {
   const startTime = Date.now();
   const traceId = parentTraceId ?? generateTraceId('processQueue');
@@ -108,17 +83,12 @@ export const processQueue = async (onProgress, parentTraceId = null) => {
     if (Platform.OS === 'android') {
       smsPermissionGranted = await requestSmsPermission();
     }
-    debugTrace('HasWhatsAppCredentialsBefore', { traceId });
+
     const waConfigured = await hasWhatsAppCredentials();
     debugTrace('HasWhatsAppCredentialsAfter', { traceId, waConfigured });
 
-    // Per-platform rolling-window counters — every platform can have its
-    // own limit + window now, not just SMS. Rate limits are looked up
-    // once per platform (cached in rateLimits) since they don't change
-    // mid-run; sentInWindow tracks how many each platform has sent so far
-    // in this run, seeded from the DB's actual count in the last window.
-    const rateLimits = new Map(); // platformId -> { limitCount, windowMinutes } | null (unlimited)
-    const sentInWindow = new Map(); // platformId -> count
+    const rateLimits = new Map();
+    const sentInWindow = new Map();
 
     const getPlatformRateLimit = (platformId) => {
       if (!rateLimits.has(platformId)) {
@@ -155,14 +125,7 @@ export const processQueue = async (onProgress, parentTraceId = null) => {
       const template = templateMap.get(item.template_id);
       const platform = platformMap.get(item.platform_id);
 
-      debugTrace('PlatformSelection', {
-        ...traceContext,
-        contactFound: !!contact,
-        templateFound: !!template,
-        platformFound: !!platform,
-        selectedPlatformId: platform?.id ?? '',
-      });
-
+      // --- RATE LIMIT CHECK ---
       const rateLimit = platform ? getPlatformRateLimit(platform.id) : null;
       if (rateLimit) {
         const currentSent = getSentInWindow(platform.id, rateLimit.windowMinutes);
@@ -174,13 +137,13 @@ export const processQueue = async (onProgress, parentTraceId = null) => {
           });
           revertToPending(item.id, traceId);
           summary.rateLimited += 1;
-          debugTrace('ProcessQueueItemContinue', { ...traceContext, action: 'continue_rate_limited' });
           continue;
         }
       }
 
       summary.processed += 1;
 
+      // --- VALIDATION CHECKS ---
       if (!contact || !template || !platform) {
         const reason = [
           !contact  && 'CONTACT_NOT_FOUND',
@@ -191,33 +154,46 @@ export const processQueue = async (onProgress, parentTraceId = null) => {
         markAsFailed(item.id, reason, traceId);
         summary.failed += 1;
         onProgress?.(summary.processed, claimed.length);
-        debugTrace('ProcessQueueItemContinue', { ...traceContext, action: 'continue_validation_failed' });
         continue;
       }
 
-      const needsEmail =
-        platform.id === 'email' || platform.id === 'gmail' ||
-        (platform.url_scheme ?? '').includes('{email}');
+      const needsEmail = platform.id === 'email' || platform.id === 'gmail' || (platform.url_scheme ?? '').includes('{email}');
       if (needsEmail && !contact.email) {
         debugTrace('ProcessQueueItemValidationFailed', { ...traceContext, exitReason: 'email_missing_on_contact' });
         markAsFailed(item.id, 'EMAIL_MISSING_ON_CONTACT', traceId);
         summary.failed += 1;
         onProgress?.(summary.processed, claimed.length);
-        debugTrace('ProcessQueueItemContinue', { ...traceContext, action: 'continue_email_missing' });
         continue;
       }
 
-      const needsPhone =
-        platform.id === 'sms' || platform.id === 'whatsapp' ||
-        (platform.url_scheme ?? '').includes('{phone}');
+      const needsPhone = platform.id === 'sms' || platform.id === 'whatsapp' || (platform.url_scheme ?? '').includes('{phone}');
       if (needsPhone && !contact.phone_number) {
         debugTrace('ProcessQueueItemValidationFailed', { ...traceContext, exitReason: 'phone_missing_on_contact' });
         markAsFailed(item.id, 'PHONE_MISSING_ON_CONTACT', traceId);
         summary.failed += 1;
         onProgress?.(summary.processed, claimed.length);
-        debugTrace('ProcessQueueItemContinue', { ...traceContext, action: 'continue_phone_missing' });
         continue;
       }
+
+      // ========================================================================
+      // 🚨 INDUSTRY-GRADE IN-FLIGHT GUARD RAIL
+      // Location: inside loop, right before dispatch (after validations/delays).
+      // Action: silent skip (continue). NO markAsFailed/markAsSent.
+      // States: SUPERSEDED, CANCELLED, SENT, or DELETED (!freshRow).
+      // ✅ FIXED: uses exported getQueueRowById() from messageQueueDB.js —
+      // no raw getDB()/db.execute() here, preserving DB-layering convention.
+      // ========================================================================
+      const freshRow = getQueueRowById(item.id);
+
+      if (!freshRow || freshRow.status === 'SUPERSEDED' || freshRow.status === 'CANCELLED' || freshRow.status === 'SENT') {
+        debugTrace('ProcessQueueItemInFlightAbort', {
+          ...traceContext,
+          exitReason: 'in_flight_aborted_by_guard_rail',
+          freshStatus: freshRow?.status ?? 'DELETED_VIA_CASCADE',
+        });
+        continue;
+      }
+      // ========================================================================
 
       let isSmsAttempt = false;
 
@@ -272,7 +248,7 @@ export const processQueue = async (onProgress, parentTraceId = null) => {
 
     if (summary.rateLimited > 0) {
       debugTrace('ProcessQueueRateLimitedSummary', {
-        traceId, rateLimitedCount: summary.rateLimited, exitReason: 'sms_deferred_for_next_run',
+        traceId, rateLimitedCount: summary.rateLimited, exitReason: 'deferred_for_next_run',
       });
     }
 

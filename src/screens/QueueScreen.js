@@ -35,8 +35,6 @@ const STATUS_META = {
 
 /**
  * Allow retry for failed SMS (Android) and failed WhatsApp messages.
- * WhatsApp messages can fail due to API errors, network issues, etc.,
- * and can be safely retried.
  */
 const shouldShowRetry  = (item) =>
   item.status === 'FAILED' && 
@@ -77,7 +75,6 @@ export default function QueueScreen() {
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
     loadData();
-    // Give a small delay so the refresh control animation is visible
     setTimeout(() => setRefreshing(false), 500);
   }, [loadData]);
 
@@ -105,11 +102,8 @@ export default function QueueScreen() {
         {
           text: 'Retry Now',
           onPress: async () => {
-            // 1. Revert the failed item back to PENDING
             revertToPending(item.id);
-            loadData(); // Update UI immediately to show it as Pending
-            
-            // 2. Trigger queue processing in the background
+            loadData();
             setProcessing(true);
             try {
               await processQueue();
@@ -117,7 +111,7 @@ export default function QueueScreen() {
               console.error('Error processing queue on retry:', error);
             } finally {
               setProcessing(false);
-              loadData(); // Refresh UI again after processing completes
+              loadData();
             }
           },
         },
@@ -166,12 +160,8 @@ export default function QueueScreen() {
         <Text style={styles.contactName}>
           {contact ? contact.name : `Contact #${item.contact_id}`}
         </Text>
-        {contact?.phone_number
-          ? <Text style={styles.contactSub}>{contact.phone_number}</Text>
-          : null}
-        {contact?.email
-          ? <Text style={styles.contactSub}>{contact.email}</Text>
-          : null}
+        {contact?.phone_number ? <Text style={styles.contactSub}>{contact.phone_number}</Text> : null}
+        {contact?.email ? <Text style={styles.contactSub}>{contact.email}</Text> : null}
 
         {/* Template */}
         <Text style={styles.templateName}>
@@ -183,9 +173,17 @@ export default function QueueScreen() {
         {/* Timestamps */}
         <View style={styles.timeRow}>
           <Text style={styles.timeText}>Queued: {formatDateTime12Hour(item.created_at)}</Text>
-          {item.sent_at
-            ? <Text style={styles.timeText}>Sent: {formatDateTime12Hour(item.sent_at)}</Text>
-            : null}
+          
+          {/* ✅ ADDED: Explicitly show scheduled time for pending items to eliminate confusion */}
+          {item.status === 'PENDING' ? (
+            <Text style={[styles.timeText, { color: meta.color, fontWeight: '600' }]}>
+              Scheduled for: {formatDateTime12Hour(item.scheduled_for)}
+            </Text>
+          ) : null}
+
+          {item.sent_at ? (
+            <Text style={styles.timeText}>Sent: {formatDateTime12Hour(item.sent_at)}</Text>
+          ) : null}
         </View>
 
         {/* Error */}
@@ -197,9 +195,7 @@ export default function QueueScreen() {
           </View>
         ) : null}
 
-        {item.attempt_count > 0
-          ? <Text style={styles.attemptText}>Attempts: {item.attempt_count}</Text>
-          : null}
+        {item.attempt_count > 0 ? <Text style={styles.attemptText}>Attempts: {item.attempt_count}</Text> : null}
 
         {/* Action buttons */}
         {(showRetry || showDelete) && (
@@ -234,7 +230,7 @@ export default function QueueScreen() {
       <Text style={styles.emptyTitle}>No {STATUS_META[status].label} Messages</Text>
       <Text style={styles.emptySubtitle}>
         {status === 'PENDING'
-          ? 'Messages will appear here and send automatically.'
+          ? 'Messages will appear here and send automatically at their scheduled time.'
           : status === 'SENT'
           ? 'Successfully sent messages will appear here.'
           : 'Failed deliveries will be listed here with their reasons.'}
@@ -252,7 +248,7 @@ export default function QueueScreen() {
         </View>
       )}
 
-      {/* Tabs — sliding indicator tracks the swipe in real time; tap jumps straight there */}
+      {/* Tabs */}
       <View style={styles.tabBar}>
         <Animated.View
           style={[
@@ -291,7 +287,7 @@ export default function QueueScreen() {
         })}
       </View>
 
-      {/* Pages — swipe between PENDING / SENT / FAILED, each with its own list */}
+      {/* Pages */}
       <Animated.ScrollView
         ref={pagerRef}
         horizontal

@@ -7,6 +7,7 @@ import {
   cancelAllScheduledAlarmsForTemplate,
   getAllActiveScheduledAlarms,
   getScheduledAlarm,
+  deleteScheduledAlarm,
 } from '../database/scheduledAlarmDB';
 import { debugTrace, debugTraceError, debugTraceDuration, generateTraceId } from './debugTrace';
 import { toPakistanParts, pakistanPartsToUtcMs } from './pakistanTime';
@@ -23,9 +24,6 @@ export const isAlarmModuleAvailable = () =>
   typeof AlarmModule.scheduleExactAlarm === 'function' &&
   typeof AlarmModule.cancelExactAlarm === 'function';
 
-/**
- * Deterministic 32-bit-safe hash for (contactId, templateId) -> requestCode.
- */
 export const getRequestCode = (contactId, templateId) => {
   const str = `${contactId}:${templateId}`;
   let hash = 0;
@@ -142,21 +140,6 @@ export const runPermissionOnboardingFlow = async () => {
   }
 };
 
-/**
- * Computes the alarm fire time for one template against one contact.
- *
- * days_before semantics:
- *   positive -> fires BEFORE expiry (existing behavior)
- *   zero     -> fires ON expiry day
- *   negative -> fires AFTER expiry (overdue reminder)
- *
- * If the computed moment is already in the past — either because an
- * after-expiry template's exact moment has passed, or because a contact
- * was added/synced late and its due reminder time already went by —
- * this fires almost immediately instead of silently dropping it. There
- * is no cutoff on how old the expiry can be; any overdue contact is
- * still eligible.
- */
 export const computeTargetAlarmTimestamp = (contact, template) => {
   const expiry = new Date(contact.expiry_datetime);
   if (isNaN(expiry.getTime())) return null;
@@ -168,16 +151,12 @@ export const computeTargetAlarmTimestamp = (contact, template) => {
 
   const timeMatch = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(template.send_time ?? '');
 
-  // Everything below is expressed in Pakistan wall-clock time (fixed
-  // UTC+5, no DST) — never the device's own timezone. "days_before"
-  // shifts by whole days on the Pakistan calendar.
   const expiryParts = toPakistanParts(expiry);
   const expiryPktMidnightMs = pakistanPartsToUtcMs(expiryParts.year, expiryParts.month, expiryParts.day);
   const shiftedMidnightMs = expiryPktMidnightMs - daysBefore * 24 * 60 * 60 * 1000;
   const shiftedParts = toPakistanParts(new Date(shiftedMidnightMs));
 
   if (!timeMatch) {
-    // No explicit send_time — keep the expiry's own Pakistan time-of-day.
     return pakistanPartsToUtcMs(
       shiftedParts.year, shiftedParts.month, shiftedParts.day,
       expiryParts.hour, expiryParts.minute, expiryParts.second,
@@ -190,20 +169,6 @@ export const computeTargetAlarmTimestamp = (contact, template) => {
   );
 };
 
-/**
- * True when a template's exact target time had already gone by BEFORE the
- * contact even existed in the system — e.g. Template A is fixed for 10:20,
- * the contact is added at 10:25 with an expiry of 10:45. From the contact's
- * point of view, that 10:20 slot never applied to them; it belongs to the
- * period before they were added. Firing it "as a catch-up" the instant they
- * join is the bug — it should simply be skipped, and the scheduler should
- * wait for the next genuinely-future template (here, the 10:45 one).
- *
- * This is deliberately different from a template whose time passed while
- * the contact already existed (e.g. the app was closed or the device was
- * asleep) — that case is a real miss and should still catch up, which is
- * why this only compares against contact.created_at, never against "now".
- */
 export const wasAlarmTargetBeforeContactCreated = (contact, alarmMs) => {
   if (alarmMs === null || !contact?.created_at) return false;
   const createdAtMs = new Date(contact.created_at).getTime();
@@ -215,12 +180,10 @@ export const computeAlarmTimestamp = (contact, template) => {
   const alarmMs = computeTargetAlarmTimestamp(contact, template);
   if (alarmMs === null) return null;
 
-  // The slot was already gone before this contact existed — it never
-  // applied to them, so don't schedule (and definitely don't fire) it.
   if (wasAlarmTargetBeforeContactCreated(contact, alarmMs)) return null;
 
   if (alarmMs <= Date.now()) {
-    return Date.now() + IMMEDIATE_ALARM_DELAY_MS; // fire almost immediately
+    return Date.now() + IMMEDIATE_ALARM_DELAY_MS;
   }
 
   return alarmMs;
@@ -239,22 +202,32 @@ export const scheduleAlarm = async (contactId, templateId, timestampMs) => {
     handleError(new Error('AlarmModule is not linked'), 'scheduleAlarm');
     return 'FAILED_NATIVE_MODULE_UNAVAILABLE';
   }
+  
+  const traceId = generateTraceId('scheduleAlarm');
+  debugTrace('ScheduleAlarmStart', { traceId, contactId, templateId, timestampMs });
+
   try {
     const triggerAtISO = new Date(timestampMs).toISOString().replace(/\.\d{3}Z$/, 'Z');
     const existing = getScheduledAlarm(contactId, templateId);
+    
     if (
       existing &&
       (existing.status === 'fired' || existing.status === 'firing') &&
       existing.trigger_at === triggerAtISO
     ) {
-      // Same cycle already fired (or is mid-fire) — a reschedule pass
-      // (template edit/create, contact add) must not re-arm a native alarm
-      // for a pair that already sent. Previously this always re-armed,
-      // which caused the duplicate-send-minutes-later bug.
+      debugTrace('ScheduleAlarmSkipAlreadyFired', { traceId, contactId, templateId });
       return 'SKIPPED_ALREADY_FIRED';
     }
 
     const requestCode = getRequestCode(contactId, templateId);
+
+    const dbSuccess = upsertScheduledAlarm(contactId, templateId, requestCode, triggerAtISO);
+    
+    if (!dbSuccess) {
+      debugTraceError('ScheduleAlarmDbFailed', new Error('DB upsert failed'), { traceId, contactId, templateId });
+      return 'FAILED_DB_UPSERT';
+    }
+
     const result = await AlarmModule.scheduleExactAlarm(
       requestCode,
       contactId,
@@ -263,45 +236,51 @@ export const scheduleAlarm = async (contactId, templateId, timestampMs) => {
     );
 
     if (result === 'SCHEDULED') {
-      upsertScheduledAlarm(contactId, templateId, requestCode, triggerAtISO);
-      // Refresh only now — after the new row is actually written — so the
-      // notification/widget "next alarm" query sees it. Refreshing earlier
-      // (previously done inside the native module, right after
-      // promise.resolve) raced ahead of this write and kept showing the
-      // previous next-alarm.
       if (AlarmModule.refreshReminderSurfaces) {
         AlarmModule.refreshReminderSurfaces().catch((error) => {
           handleError(error, 'scheduleAlarm.refreshReminderSurfaces');
         });
       }
+      debugTrace('ScheduleAlarmSuccess', { traceId, contactId, templateId, requestCode });
     }
 
     return result;
   } catch (error) {
+    debugTraceError('ScheduleAlarmCatch', error, { function: 'scheduleAlarm', traceId, contactId, templateId });
     handleError(error, 'scheduleAlarm');
     return 'FAILED_EXCEPTION';
   }
 };
 
 export const cancelAlarm = async (contactId, templateId) => {
-  if (Platform.OS !== 'android') return true;
+  if (Platform.OS !== 'android') {
+    deleteScheduledAlarm(contactId, templateId);
+    return true;
+  }
   if (!isAlarmModuleAvailable()) {
-    markScheduledAlarmCancelled(contactId, templateId);
+    deleteScheduledAlarm(contactId, templateId);
     return false;
   }
+  
+  const traceId = generateTraceId('cancelAlarm');
+  debugTrace('CancelAlarmStart', { traceId, contactId, templateId });
+
   try {
     const requestCode = getRequestCode(contactId, templateId);
     const nativeResult = await AlarmModule.cancelExactAlarm(requestCode, contactId, templateId);
-    markScheduledAlarmCancelled(contactId, templateId);
-    // Same ordering fix as scheduleAlarm: only refresh the notification/
-    // widget after the cancellation has actually landed in SQLite.
+    
+    deleteScheduledAlarm(contactId, templateId);
+    
     if (AlarmModule.refreshReminderSurfaces) {
       AlarmModule.refreshReminderSurfaces().catch((error) => {
         handleError(error, 'cancelAlarm.refreshReminderSurfaces');
       });
     }
+    
+    debugTrace('CancelAlarmSuccess', { traceId, contactId, templateId, nativeResult });
     return nativeResult;
   } catch (error) {
+    debugTraceError('CancelAlarmCatch', error, { function: 'cancelAlarm', traceId, contactId, templateId });
     handleError(error, 'cancelAlarm');
     return false;
   }
@@ -321,6 +300,7 @@ export const scheduleAlarmsForContact = async (contact, activeTemplates) => {
 export const cancelAlarmsForContact = async (contactId) => {
   const cancelledRows = cancelAllScheduledAlarmsForContact(contactId);
   if (Platform.OS !== 'android' || !isAlarmModuleAvailable()) return cancelledRows.length;
+  
   for (const row of cancelledRows) {
     try {
       await AlarmModule.cancelExactAlarm(row.request_code, row.contact_id, row.template_id);
@@ -328,6 +308,7 @@ export const cancelAlarmsForContact = async (contactId) => {
       handleError(error, 'cancelAlarmsForContact.native');
     }
   }
+  
   if (cancelledRows.length > 0 && AlarmModule.refreshReminderSurfaces) {
     AlarmModule.refreshReminderSurfaces().catch((error) => {
       handleError(error, 'cancelAlarmsForContact.refreshReminderSurfaces');
@@ -339,6 +320,7 @@ export const cancelAlarmsForContact = async (contactId) => {
 export const cancelAlarmsForTemplate = async (templateId) => {
   const cancelledRows = cancelAllScheduledAlarmsForTemplate(templateId);
   if (Platform.OS !== 'android' || !isAlarmModuleAvailable()) return cancelledRows.length;
+  
   for (const row of cancelledRows) {
     try {
       await AlarmModule.cancelExactAlarm(row.request_code, row.contact_id, row.template_id);
@@ -346,6 +328,7 @@ export const cancelAlarmsForTemplate = async (templateId) => {
       handleError(error, 'cancelAlarmsForTemplate.native');
     }
   }
+  
   if (cancelledRows.length > 0 && AlarmModule.refreshReminderSurfaces) {
     AlarmModule.refreshReminderSurfaces().catch((error) => {
       handleError(error, 'cancelAlarmsForTemplate.refreshReminderSurfaces');
@@ -355,7 +338,6 @@ export const cancelAlarmsForTemplate = async (templateId) => {
 };
 
 export const rescheduleAlarmsForContact = async (contact, activeTemplates) => {
-  await cancelAlarmsForContact(contact.id);
   return scheduleAlarmsForContact(contact, activeTemplates);
 };
 
@@ -375,10 +357,6 @@ export const rescheduleAlarmsForTemplate = async (template, allContacts) => {
 };
 
 export const rearmAllScheduledAlarmsAfterBoot = async () => {
-  // Lazy require (not a top-level import) — alarmFireCore.js imports
-  // computeTargetAlarmTimestamp from this module, so a top-level import
-  // here would be circular. By the time this function actually runs,
-  // both modules are fully loaded and this resolves normally.
   const { fireScheduledPair } = require('./alarmFireCore');
 
   const activeRows = getAllActiveScheduledAlarms();
@@ -394,11 +372,6 @@ export const rearmAllScheduledAlarmsAfterBoot = async () => {
     }
 
     if (triggerMs <= Date.now()) {
-      // Missed during downtime (device off/killed through the trigger
-      // moment) — this used to silently cancel the row, which meant the
-      // reminder was simply never sent and nothing recorded it. Fire it
-      // now through the same claim->validate->queue path AlarmReceiver
-      // itself uses, instead of dropping it.
       const outcome = await fireScheduledPair(row.contact_id, row.template_id, generateTraceId('bootMissed'));
       if (outcome === 'fired' || outcome === 'already_handled') firedImmediately += 1;
       continue;
@@ -425,6 +398,8 @@ export const rearmAllScheduledAlarmsAfterBoot = async () => {
 
   return rearmed + firedImmediately;
 };
+
+// ✅ FIXED: 'const template' declared (was previously undeclared 'a', causing a ReferenceError/implicit-global bug)
 export const cancelAlarmsForPlatform = async (platformId) => {
   const templates = getAllTemplates().filter(
     (t) => (t.platform_id ?? 'sms') === platformId

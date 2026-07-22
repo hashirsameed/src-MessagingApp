@@ -3,6 +3,7 @@ import { handleError } from '../utils/errorHandler';
 import { debugTrace, debugTraceDbWrite, debugTraceError } from '../utils/debugTrace';
 import { logAction } from './auditLogDB';
 
+// Helper to find the latest alarm for a contact/template pair via queue_id JOIN
 const findLatestAlarm = (db, contactId, templateId) => db.execute(
   `SELECT sa.*, mq.contact_id, mq.template_id, mq.scheduled_for, mq.status AS queue_status
    FROM scheduled_alarms sa JOIN message_queue mq ON mq.id = sa.queue_id
@@ -10,11 +11,17 @@ const findLatestAlarm = (db, contactId, templateId) => db.execute(
   [contactId, templateId],
 ).rows?._array?.[0] || null;
 
+/**
+ * upsertScheduledAlarm - Layer B Atomic Cancel & Reschedule
+ * Creates a 1:1 linked message_queue and scheduled_alarms row.
+ * If a schedule already exists, it atomically cancels the old one and creates the new one.
+ */
 export const upsertScheduledAlarm = (contactId, templateId, requestCode, triggerAtISO, platformId = 'sms') => {
   debugTrace('UpsertScheduledAlarmStart', { contactId, templateId, requestCode, triggerAtISO });
   try {
     const db = getDB();
 
+    // 1. Check if an identical schedule already exists (No-op optimization)
     const active = db.execute(
       `SELECT * FROM message_queue WHERE contact_id=? AND template_id=? AND status IN ('PENDING','CLAIMED')
        ORDER BY created_at DESC LIMIT 1;`,
@@ -26,11 +33,7 @@ export const upsertScheduledAlarm = (contactId, templateId, requestCode, trigger
       return true;
     }
 
-    if (active) {
-      db.execute(`DELETE FROM message_queue WHERE id = ?;`, [active.id]);
-      logAction('message_queue', active.id, 'DELETE', { status: active.status, scheduled_for: active.scheduled_for }, null);
-    }
-
+    // 2. Check if it was already fired for this exact trigger time (Prevent duplicate sends)
     const lastResolved = db.execute(
       `SELECT sa.status, sa.trigger_at FROM scheduled_alarms sa
        JOIN message_queue mq ON mq.id = sa.queue_id
@@ -43,29 +46,53 @@ export const upsertScheduledAlarm = (contactId, templateId, requestCode, trigger
       return true;
     }
 
-    const queueId = `q_${contactId}_${templateId}_${Date.now()}`;
-    debugTraceDbWrite('UpsertScheduledAlarmWrite', { table: 'message_queue', pk: queueId, oldState: 'none', newState: 'PENDING', contactId, templateId });
+    // 3. ATOMIC CANCEL & RESCHEDULE TRANSACTION
+    db.transaction((tx) => {
+      // --- CANCEL PHASE ---
+      if (active) {
+        if (active.status === 'CLAIMED') {
+          // In-flight send: Mark as SUPERSEDED so the worker can finish, 
+          // but it frees up the unique index for the new PENDING row.
+          tx.execute(`UPDATE message_queue SET status = 'SUPERSEDED' WHERE id = ?;`, [active.id]);
+          logAction('message_queue', active.id, 'SUPERSEDED', { status: 'CLAIMED' }, { status: 'SUPERSEDED' });
+          
+          // Cancel the associated alarm since we are rescheduling
+          tx.execute(`UPDATE scheduled_alarms SET status = 'cancelled', updated_at = datetime('now') WHERE queue_id = ?;`, [active.id]);
+          logAction('scheduled_alarms', active.id, 'CANCELLED', { status: 'scheduled' }, { status: 'cancelled' });
+        } else {
+          // PENDING: Safe to delete. ON DELETE CASCADE will automatically remove the scheduled_alarms row.
+          tx.execute(`DELETE FROM message_queue WHERE id = ?;`, [active.id]);
+          logAction('message_queue', active.id, 'DELETE', { status: active.status, scheduled_for: active.scheduled_for }, null);
+        }
+      }
 
-    try {
-      db.execute(
-        `INSERT INTO message_queue (id, contact_id, template_id, platform_id, status, scheduled_for)
-         VALUES (?, ?, ?, ?, 'PENDING', ?);`,
-        [queueId, contactId, templateId, platformId, triggerAtISO],
+      // --- RESCHEDULE PHASE ---
+      const queueId = `q_${contactId}_${templateId}_${Date.now()}`;
+      debugTraceDbWrite('UpsertScheduledAlarmWrite', { table: 'message_queue', pk: queueId, oldState: 'none', newState: 'PENDING', contactId, templateId });
+
+      try {
+        tx.execute(
+          `INSERT INTO message_queue (id, contact_id, template_id, platform_id, status, scheduled_for)
+           VALUES (?, ?, ?, ?, 'PENDING', ?);`,
+          [queueId, contactId, templateId, platformId, triggerAtISO],
+        );
+      } catch (raceError) {
+        // The partial unique index caught a concurrent insert for the same (contact, template) pair
+        debugTrace('UpsertScheduledAlarmRaceLost', { contactId, templateId, triggerAtISO, error: String(raceError) });
+        throw raceError; // Rollback transaction and let outer catch handle it
+      }
+
+      logAction('message_queue', queueId, 'INSERT', null, { contact_id: contactId, template_id: templateId, scheduled_for: triggerAtISO, status: 'PENDING' });
+
+      tx.execute(
+        `INSERT INTO scheduled_alarms (queue_id, request_code, trigger_at, status) VALUES (?, ?, ?, 'scheduled');`,
+        [queueId, requestCode, triggerAtISO],
       );
-    } catch (raceError) {
-      debugTrace('UpsertScheduledAlarmRaceLost', { contactId, templateId, triggerAtISO, error: String(raceError) });
-      return true;
-    }
+      logAction('scheduled_alarms', queueId, 'INSERT', null, { trigger_at: triggerAtISO, request_code: requestCode });
+      
+      debugTrace('UpsertScheduledAlarmEnd', { contactId, templateId, requestCode, queueId });
+    });
 
-    logAction('message_queue', queueId, 'INSERT', null, { contact_id: contactId, template_id: templateId, scheduled_for: triggerAtISO, status: 'PENDING' });
-
-    db.execute(
-      `INSERT INTO scheduled_alarms (queue_id, request_code, trigger_at, status) VALUES (?, ?, ?, 'scheduled');`,
-      [queueId, requestCode, triggerAtISO],
-    );
-    logAction('scheduled_alarms', queueId, 'INSERT', null, { trigger_at: triggerAtISO, request_code: requestCode });
-
-    debugTrace('UpsertScheduledAlarmEnd', { contactId, templateId, requestCode, queueId });
     return true;
   } catch (error) {
     debugTraceError('UpsertScheduledAlarmCatch', error, { function: 'upsertScheduledAlarm', contactId, templateId });
@@ -242,7 +269,9 @@ const cancelAllScheduledAlarmsBy = (column, value) => {
   try {
     const db = getDB();
     const toCancel = db.execute(
-      `SELECT sa.* FROM scheduled_alarms sa JOIN message_queue mq ON mq.id = sa.queue_id
+      `SELECT sa.id, sa.request_code, mq.contact_id, mq.template_id
+       FROM scheduled_alarms sa
+       JOIN message_queue mq ON mq.id = sa.queue_id
        WHERE mq.${column} = ? AND sa.status = 'scheduled';`,
       [value],
     ).rows?._array || [];
@@ -262,18 +291,25 @@ const cancelAllScheduledAlarmsBy = (column, value) => {
 export const cancelAllScheduledAlarmsForContact = (contactId) => cancelAllScheduledAlarmsBy('contact_id', contactId);
 export const cancelAllScheduledAlarmsForTemplate = (templateId) => cancelAllScheduledAlarmsBy('template_id', templateId);
 
+/**
+ * deleteScheduledAlarm - Optimized for Layer B Cascade
+ * Deletes from message_queue. The ON DELETE CASCADE FK automatically 
+ * removes the linked scheduled_alarms row, ensuring zero orphans.
+ */
 export const deleteScheduledAlarm = (contactId, templateId) => {
   try {
     const db = getDB();
     const row = db.execute(
-      `SELECT sa.id FROM scheduled_alarms sa JOIN message_queue mq ON mq.id = sa.queue_id
-       WHERE mq.contact_id = ? AND mq.template_id = ? ORDER BY sa.created_at DESC LIMIT 1;`,
+      `SELECT mq.id FROM message_queue mq
+       WHERE mq.contact_id = ? AND mq.template_id = ? AND status IN ('PENDING', 'CLAIMED')
+       ORDER BY mq.created_at DESC LIMIT 1;`,
       [contactId, templateId],
     ).rows?._array?.[0];
+    
     if (!row) return true;
 
-    db.execute(`DELETE FROM scheduled_alarms WHERE id = ?;`, [row.id]);
-    logAction('scheduled_alarms', String(row.id), 'DELETE', null, null);
+    db.execute(`DELETE FROM message_queue WHERE id = ?;`, [row.id]);
+    logAction('message_queue', row.id, 'DELETE', null, null);
     return true;
   } catch (error) {
     handleError(error, 'deleteScheduledAlarm');
