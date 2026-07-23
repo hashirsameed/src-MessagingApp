@@ -11,28 +11,13 @@ const findLatestAlarm = (db, contactId, templateId) => db.execute(
   [contactId, templateId],
 ).rows?._array?.[0] || null;
 
-/**
- * upsertScheduledAlarm - Layer B Atomic Cancel & Reschedule
- * Creates a 1:1 linked message_queue and scheduled_alarms row.
- * If a schedule already exists, it atomically cancels the old one and creates the new one.
- *
- * FIX 5 — Checks transaction ke andar
- * Pehle: no-op check aur already-fired check transaction ke BAHAR the. Do concurrent
- *         calls dono checks pass kar sakti thin, phir dono transaction mein ghus kar
- *         ek unhandled error deti thin.
- * Fix:   Dono checks transaction ke andar move kar diye gaye hain. Poora read-then-write
- *         ek atomic block mein hai.
- *
- * FIX 2b — queueId same-millisecond collision
- * Pehle: `q_${contactId}_${templateId}_${Date.now()}` — same millisecond mein collision.
- * Fix:   5-char random suffix add kiya.
- */
+// upsertScheduledAlarm — creates linked message_queue + scheduled_alarms row; cancels old one first if exists.
 export const upsertScheduledAlarm = (contactId, templateId, requestCode, triggerAtISO, platformId = 'sms') => {
   debugTrace('UpsertScheduledAlarmStart', { contactId, templateId, requestCode, triggerAtISO });
   try {
     const db = getDB();
 
-    // FIX 5 — Poora read-check-write ek hi transaction ke andar
+    // Read-check-write all in one transaction (avoids race between checks and write)
     db.transaction((tx) => {
 
       // 1. Check if an identical schedule already exists (No-op optimization)
@@ -78,7 +63,14 @@ export const upsertScheduledAlarm = (contactId, templateId, requestCode, trigger
         }
       }
 
-      // 4. RESCHEDULE PHASE — FIX 2b: random suffix se same-millisecond collision khatam
+      // request_code is deterministic per contact+template — old fired/cancelled
+      // rows keep it forever unless deleted here. Skip 'firing' (in-flight).
+      tx.execute(
+        `DELETE FROM scheduled_alarms WHERE request_code = ? AND status != 'firing';`,
+        [requestCode],
+      );
+
+      // 4. RESCHEDULE PHASE — random suffix avoids same-millisecond id collision
       const queueId = `${contactId}_${templateId}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
       debugTraceDbWrite('UpsertScheduledAlarmWrite', { table: 'message_queue', pk: queueId, oldState: 'none', newState: 'PENDING', contactId, templateId });
 
@@ -89,9 +81,9 @@ export const upsertScheduledAlarm = (contactId, templateId, requestCode, trigger
           [queueId, contactId, templateId, platformId, triggerAtISO],
         );
       } catch (raceError) {
-        // The partial unique index caught a concurrent insert for the same (contact, template) pair
+        // Concurrent insert for same contact+template hit the unique index
         debugTrace('UpsertScheduledAlarmRaceLost', { contactId, templateId, triggerAtISO, error: String(raceError) });
-        throw raceError; // Rollback transaction and let outer catch handle it
+        throw raceError;
       }
 
       logAction('message_queue', queueId, 'INSERT', null, { contact_id: contactId, template_id: templateId, scheduled_for: triggerAtISO, status: 'PENDING' });
@@ -277,23 +269,14 @@ export const getNextUpcomingAlarm = () => {
   }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// FIX 6 — cancelAllScheduledAlarmsBy atomic banaya
-// Pehle: SELECT se list parhi, phir alag UPDATE kiya. Dono ke darmiyan koi aur
-//         alarm fire kar sakta tha — audit log mein wo action record nahi hoti.
-// Fix:   Ek hi UPDATE statement jisme WHERE clause directly condition check kare.
-//         Phir audit log ke liye affected rows parhe jayen.
-// ─────────────────────────────────────────────────────────────────────────────
+// cancelAllScheduledAlarmsBy — select+update in one transaction so nothing fires in between.
 const cancelAllScheduledAlarmsBy = (column, value) => {
   try {
     const db = getDB();
     let toCancel = [];
     let confirmedIds = new Set();
 
-    // FIX 6b — SELECT + UPDATE ab ek real db.transaction() ke andar hain, taake
-    // native side (PersistentReminderService.kt) se koi cross-process write
-    // beech mein na aa sake — pehle ka "atomic" comment sach nahi tha, do
-    // separate statements the.
+    // Real transaction — keeps native side from writing in between select and update
     db.transaction((tx) => {
       toCancel = tx.execute(
         `SELECT sa.id, sa.request_code, mq.contact_id, mq.template_id
@@ -307,8 +290,7 @@ const cancelAllScheduledAlarmsBy = (column, value) => {
 
       const placeholders = toCancel.map(() => '?').join(',');
 
-      // Sirf wo rows cancel karo jo abhi bhi 'scheduled' hain. Agar SELECT aur
-      // UPDATE ke darmiyan koi 'firing' ho gaya, wo guard se skip ho jayegi.
+      // Only cancel rows still 'scheduled' — skip any that became 'firing' mid-way
       db.execute(
         `UPDATE scheduled_alarms
          SET status = 'cancelled', updated_at = datetime('now')
@@ -316,10 +298,7 @@ const cancelAllScheduledAlarmsBy = (column, value) => {
         toCancel.map((r) => r.id),
       );
 
-      // FIX 6b — Re-verify: audit log sirf un rows ke liye likho jo UPDATE ne
-      // waqai cancel ki hain. Pehle poori toCancel list unconditionally log ho
-      // rahi thi, chahe guard ne kisi row ko skip kiya ho — galat "CANCELLED"
-      // audit entry ban sakti thi us row ke liye jo asal mein cancel hi nahi hui.
+      // Only log rows the UPDATE actually cancelled, not the full candidate list
       const confirmed = db.execute(
         `SELECT id FROM scheduled_alarms WHERE id IN (${placeholders}) AND status = 'cancelled';`,
         toCancel.map((r) => r.id),
@@ -342,11 +321,7 @@ const cancelAllScheduledAlarmsBy = (column, value) => {
 export const cancelAllScheduledAlarmsForContact = (contactId) => cancelAllScheduledAlarmsBy('contact_id', contactId);
 export const cancelAllScheduledAlarmsForTemplate = (templateId) => cancelAllScheduledAlarmsBy('template_id', templateId);
 
-/**
- * deleteScheduledAlarm - Optimized for Layer B Cascade
- * Deletes from message_queue. The ON DELETE CASCADE FK automatically 
- * removes the linked scheduled_alarms row, ensuring zero orphans.
- */
+// deleteScheduledAlarm — deletes message_queue row; CASCADE removes linked scheduled_alarms row.
 export const deleteScheduledAlarm = (contactId, templateId) => {
   try {
     const db = getDB();

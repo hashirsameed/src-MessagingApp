@@ -70,7 +70,15 @@ export default function QueueScreen() {
     setTemplateMap(tMap);
   }, []);
 
-  useFocusEffect(useCallback(() => { loadData(); }, [loadData]));
+  // Live-refresh while screen is focused — messages get sent by a background
+  // native alarm, not by any UI action, so focus-only reload wasn't enough.
+  useFocusEffect(
+    useCallback(() => {
+      loadData();
+      const interval = setInterval(loadData, 5000);
+      return () => clearInterval(interval);
+    }, [loadData])
+  );
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
