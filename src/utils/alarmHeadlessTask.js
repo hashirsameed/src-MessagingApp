@@ -5,8 +5,53 @@ import { rearmAllScheduledAlarmsAfterBoot, scheduleAlarmsForContact } from './al
 import { processQueue } from './queueProcessor';
 import { getAllContacts } from '../database/contactDB';
 import { getActiveTemplates } from '../database/templateDB';
+import { getDB } from '../database/db';
 import { handleError } from './errorHandler';
 import { debugTrace, debugTraceError, debugTraceDuration, generateTraceId } from './debugTrace';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FIX 7 — SafetyNetTask distributed lock (DB-based)
+// Masla: Android WorkManager rare cases mein ek hi SafetyNetTask ke do instances
+//         chala sakta hai. fireScheduledPair() ka CAS guard correctness protect
+//         karta hai lekin dono instances poora scan + kaam karte hain — waste.
+// Fix:   settings table mein 'safetynet_lock' row ko DB-level lock ki tarah use
+//         karo. UPDATE sirf tab succeed karti hai jab lock NULL ho ya 10 minute
+//         se pehle set hua ho (stale lock ko yani app crash ke baad).
+//         rowsAffected === 0 matlab doosra instance pehle se chal raha hai.
+// ─────────────────────────────────────────────────────────────────────────────
+const SAFETY_NET_LOCK_TIMEOUT_MINUTES = 10;
+
+const acquireSafetyNetLock = (traceId) => {
+  try {
+    const db = getDB();
+    const result = db.execute(
+      `UPDATE settings
+       SET value = datetime('now'), updated_at = datetime('now')
+       WHERE key = 'safetynet_lock'
+         AND (value IS NULL OR datetime(value) < datetime('now', '-${SAFETY_NET_LOCK_TIMEOUT_MINUTES} minutes'));`,
+    );
+    const acquired = (result?.rowsAffected ?? 0) > 0;
+    debugTrace('SafetyNetLockAcquire', { traceId, acquired });
+    return acquired;
+  } catch (error) {
+    handleError(error, 'acquireSafetyNetLock');
+    // Lock acquire fail hua — safe side pe rehte hain, assume nahi kiya keh acquired hai
+    return false;
+  }
+};
+
+const releaseSafetyNetLock = (traceId) => {
+  try {
+    const db = getDB();
+    db.execute(
+      `UPDATE settings SET value = NULL, updated_at = datetime('now') WHERE key = 'safetynet_lock';`,
+    );
+    debugTrace('SafetyNetLockRelease', { traceId });
+  } catch (error) {
+    handleError(error, 'releaseSafetyNetLock');
+    // Lock release fail — koi badi baat nahi, timeout se automatically free hoga
+  }
+};
 
 /**
  * AlarmFiredTask — thin wrapper. All the actual claim/validate/queue logic
@@ -68,6 +113,15 @@ export const SafetyNetTask = async () => {
   const startTime = Date.now();
   const traceId = generateTraceId('safetyNet');
   debugTrace('SafetyNetTaskStart', { traceId, status: 'starting' });
+
+  // FIX 7 — Distributed lock acquire karo
+  // Agar doosra instance pehle se chal raha hai, foran return karo
+  const lockAcquired = acquireSafetyNetLock(traceId);
+  if (!lockAcquired) {
+    debugTrace('SafetyNetTaskSkipped', { traceId, reason: 'lock_held_by_another_instance' });
+    return;
+  }
+
   try {
     // Step 1 — Scan: pure read, the single source of truth for "what's
     // due right now." Nothing has happened yet at this point.
@@ -98,6 +152,9 @@ export const SafetyNetTask = async () => {
     debugTraceError('SafetyNetTaskCatch', error, { traceId, function: 'SafetyNetTask' });
     handleError(error, 'SafetyNetTask');
     debugTraceDuration('SafetyNetTaskEnd', startTime, { traceId, outcome: 'error' });
+  } finally {
+    // FIX 7 — Lock hamesha release karo — chahe success ho ya error
+    releaseSafetyNetLock(traceId);
   }
 };
 

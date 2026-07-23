@@ -14,12 +14,28 @@ import { debugTrace, debugTraceError, debugTraceDuration, generateTraceId } from
 const FAR_PAST_YEARS   = 20;
 const FAR_FUTURE_YEARS = 2;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// FIX 3 — runExpiryCheck re-entrancy guard
+// Masla: AppState foreground check aur background SafetyNetTask ek waqt mein
+//         runExpiryCheck() call kar sakte hain. DB ka UNIQUE index duplicates
+//         rokta hai lekin double kaam aur confusing logs hote hain.
+// Fix:   Module-level _checkInProgress flag. Doosri call foran return karti hai.
+// ─────────────────────────────────────────────────────────────────────────────
+let _checkInProgress = false;
+
 // Maximum grace period (in ms) after a template's exact send_time during which
 // it is still eligible to be picked up by the scheduler. This prevents a 
 // template scheduled for 5 PM from being picked up at 8 PM.
 const MAX_TEMPLATE_GRACE_PERIOD_MS = 60 * 60 * 1000; // 1 hour
 
 export const runExpiryCheck = async (parentTraceId = null) => {
+  // FIX 3 — Re-entrancy guard: agar pehle se chal raha hai to foran return karo
+  if (_checkInProgress) {
+    debugTrace('RunExpiryCheckSkipped', { reason: 'already_running', parentTraceId: parentTraceId ?? 'none' });
+    return { checked: 0, queued: 0, skippedNoTemplate: 0, skippedTimeWindow: 0 };
+  }
+  _checkInProgress = true;
+
   const startTime = Date.now();
   const traceId = parentTraceId ?? generateTraceId('runExpiryCheck');
   debugTrace('RunExpiryCheckStart', { traceId, parentTraceId: parentTraceId ?? 'none' });
@@ -159,5 +175,8 @@ export const runExpiryCheck = async (parentTraceId = null) => {
     handleError(error, 'runExpiryCheck');
     debugTraceDuration('RunExpiryCheckEnd', startTime, { traceId, outcome: 'error' });
     return { checked: 0, queued: 0, skippedNoTemplate: 0, skippedTimeWindow: 0 };
+  } finally {
+    // FIX 3 — Lock hamesha release karo, chahe error aaye ya na aaye
+    _checkInProgress = false;
   }
 };

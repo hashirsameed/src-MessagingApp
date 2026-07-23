@@ -15,6 +15,15 @@ import { isConfigured as hasWhatsAppCredentials } from '../platforms/whatsappAda
 
 const { AlarmModule } = NativeModules;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// FIX 1 — processQueue concurrency lock
+// Masla: runExpiryCheck, AlarmFiredTask, aur SafetyNetTask teeno ek waqt mein
+//         processQueue() call kar sakte hain. Concurrent calls ki apni alag
+//         sentInWindow Map hoti hai, isliye rate limit galat count hoti thi.
+// Fix:   Module-level _isProcessing flag. Doosri call foran return karti hai.
+// ─────────────────────────────────────────────────────────────────────────────
+let _isProcessing = false;
+
 const refreshReminderSurfacesIfChanged = (summary) => {
   if (Platform.OS !== 'android') return;
   if (!AlarmModule?.refreshReminderSurfaces) return;
@@ -48,6 +57,13 @@ const dispatchItem = async (platform, contact, message, smsPermissionGranted, wa
 };
 
 export const processQueue = async (onProgress, parentTraceId = null) => {
+  // FIX 1 — Concurrency guard: agar pehle se chal raha hai to foran return karo
+  if (_isProcessing) {
+    debugTrace('ProcessQueueSkipped', { reason: 'already_running', parentTraceId: parentTraceId ?? 'none' });
+    return { processed: 0, sent: 0, opened: 0, failed: 0, rateLimited: 0 };
+  }
+  _isProcessing = true;
+
   const startTime = Date.now();
   const traceId = parentTraceId ?? generateTraceId('processQueue');
   const summary = { processed: 0, sent: 0, opened: 0, failed: 0, rateLimited: 0 };
@@ -261,5 +277,8 @@ export const processQueue = async (onProgress, parentTraceId = null) => {
     debugTraceDuration('ProcessQueueEnd', startTime, { traceId, outcome: 'error', ...summary });
     refreshReminderSurfacesIfChanged(summary);
     return summary;
+  } finally {
+    // FIX 1 — Lock hamesha release karo, chahe error aaye ya na aaye
+    _isProcessing = false;
   }
 };

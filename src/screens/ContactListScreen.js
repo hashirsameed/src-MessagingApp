@@ -4,7 +4,7 @@ import {
   StyleSheet, StatusBar, Alert, Platform,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
-import { getAllContacts, deleteContact, updateContact } from '../database/contactDB';
+import { getAllContacts, deleteContact, updateContactAndReschedule } from '../database/contactDB';
 import { getAllTemplates } from '../database/templateDB';
 import { getScheduledAlarmsByContact } from '../database/scheduledAlarmDB';
 import { getDaysUntilExpiry, findMatchingTemplate } from '../utils/templateMatcher';
@@ -61,14 +61,11 @@ export default function ContactListScreen({ navigation }) {
     refreshTestAlarms(contact.id);
   };
 
-  // Update Time — overwrites ONLY contacts.expiry_date / expiry_datetime,
-  // via the exact same updateContact() used elsewhere. Nothing else: no
-  // scheduleAlarmsForContact call, no scheduled_alarms write, no native
-  // alarm touch. scheduled_alarms rows are left exactly as they are —
-  // whatever the real background logic (Scan / Reconciler) does with the
-  // now-changed contact is the thing being tested, not something this
-  // button simulates itself.
-  const handleUpdateTestTime = (contact) => {
+  // Update Time — updates contacts.expiry_date / expiry_datetime AND, if
+  // the expiry actually changed, reschedules that contact's alarms via
+  // updateContactAndReschedule() (cancel old + schedule new against active
+  // templates). This is now the same path a real edit would take.
+  const handleUpdateTestTime = async (contact) => {
     const dateResult = validateDate(testDate);
     const timeResult = validateTime(testTime);
     const newErrors = {};
@@ -90,7 +87,7 @@ export default function ContactListScreen({ navigation }) {
       }
       const expiryUTC = localDateTime.toISOString().replace(/\.\d{3}Z$/, 'Z');
 
-      const ok = updateContact({
+      const { ok, rescheduled } = await updateContactAndReschedule({
         id: contact.id,
         name: contact.name,
         phone_number: contact.phone_number,
@@ -102,7 +99,10 @@ export default function ContactListScreen({ navigation }) {
       }
       loadContacts();
       refreshTestAlarms(contact.id);
-      showSuccess('Time Updated', `${contact.name}'s expiry has been updated in the database.`);
+      showSuccess(
+        'Time Updated',
+        `${contact.name}'s expiry has been updated${rescheduled ? ' and alarms rescheduled.' : ' in the database.'}`
+      );
     } catch (error) {
       handleError(error, 'ContactListScreen.handleUpdateTestTime');
       showError('Error', ErrorMessages.DB_WRITE);

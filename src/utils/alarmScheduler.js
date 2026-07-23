@@ -24,13 +24,37 @@ export const isAlarmModuleAvailable = () =>
   typeof AlarmModule.scheduleExactAlarm === 'function' &&
   typeof AlarmModule.cancelExactAlarm === 'function';
 
+// ─────────────────────────────────────────────────────────────────────────────
+// FIX 4 — getRequestCode hash collision risk kam kiya
+// Pehle: Sirf 31-bit hash (max ~2.1 billion values). Bohot contacts × templates
+//         mein do alag pairs ka ek hi requestCode ban sakta tha. `scheduled_alarms`
+//         mein `request_code UNIQUE` constraint fail hoti — alarm schedule nahi
+//         hota, kisi ko pata nahi chalta (silent miss).
+// Fix:   Do-pass polynomial hash: pehle forward, phir backward. Dono ko XOR karo.
+//         Same string length mein anagram collisions practically khatam.
+//         Phir `>>> 0` se unsigned 32-bit banao — Android requestCode
+//         positive integer mangta hai.
+// ─────────────────────────────────────────────────────────────────────────────
 export const getRequestCode = (contactId, templateId) => {
   const str = `${contactId}:${templateId}`;
-  let hash = 0;
+
+  // Forward pass
+  let h1 = 0;
   for (let i = 0; i < str.length; i++) {
-    hash = (hash * 31 + str.charCodeAt(i)) | 0;
+    h1 = (Math.imul(h1, 31) + str.charCodeAt(i)) | 0;
   }
-  return hash & 0x7fffffff;
+
+  // Backward pass — anagram collision rok-ta hai (e.g. "ab:cd" vs "cd:ab")
+  let h2 = 0;
+  for (let i = str.length - 1; i >= 0; i--) {
+    h2 = (Math.imul(h2, 37) + str.charCodeAt(i)) | 0;
+  }
+
+  // XOR dono hashes, phir 31-bit positive range mein mask karo — Android
+  // PendingIntent/AlarmManager ka requestCode signed 32-bit Java int hota h
+  // (max 2147483647). `>>> 0` unsigned 32-bit deta tha jo isse overflow kr sakta
+  // tha; `& 0x7fffffff` hamesha 0..2147483647 range mein rakhta h.
+  return (h1 ^ h2) & 0x7fffffff;
 };
 
 export const canScheduleExactAlarms = async () => {

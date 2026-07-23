@@ -133,6 +133,11 @@ const ensureSchema = (db) => {
     value TEXT,
     updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
   );`);
+
+  // FIX 7 — SafetyNetTask distributed lock seed
+  // Ye row SafetyNetTask ke concurrent runs rokne ke liye use hoti hai.
+  // INSERT OR IGNORE: fresh install par banegi, existing installs par kuch nahi karti.
+  db.execute(`INSERT OR IGNORE INTO settings (key, value) VALUES ('safetynet_lock', NULL);`);
 };
 
 const seedQaContacts = (db) => {

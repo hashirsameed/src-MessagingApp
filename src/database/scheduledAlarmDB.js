@@ -15,47 +15,59 @@ const findLatestAlarm = (db, contactId, templateId) => db.execute(
  * upsertScheduledAlarm - Layer B Atomic Cancel & Reschedule
  * Creates a 1:1 linked message_queue and scheduled_alarms row.
  * If a schedule already exists, it atomically cancels the old one and creates the new one.
+ *
+ * FIX 5 — Checks transaction ke andar
+ * Pehle: no-op check aur already-fired check transaction ke BAHAR the. Do concurrent
+ *         calls dono checks pass kar sakti thin, phir dono transaction mein ghus kar
+ *         ek unhandled error deti thin.
+ * Fix:   Dono checks transaction ke andar move kar diye gaye hain. Poora read-then-write
+ *         ek atomic block mein hai.
+ *
+ * FIX 2b — queueId same-millisecond collision
+ * Pehle: `q_${contactId}_${templateId}_${Date.now()}` — same millisecond mein collision.
+ * Fix:   5-char random suffix add kiya.
  */
 export const upsertScheduledAlarm = (contactId, templateId, requestCode, triggerAtISO, platformId = 'sms') => {
   debugTrace('UpsertScheduledAlarmStart', { contactId, templateId, requestCode, triggerAtISO });
   try {
     const db = getDB();
 
-    // 1. Check if an identical schedule already exists (No-op optimization)
-    const active = db.execute(
-      `SELECT * FROM message_queue WHERE contact_id=? AND template_id=? AND status IN ('PENDING','CLAIMED')
-       ORDER BY created_at DESC LIMIT 1;`,
-      [contactId, templateId],
-    ).rows?._array?.[0] || null;
-
-    if (active?.scheduled_for === triggerAtISO) {
-      debugTrace('UpsertScheduledAlarmNoOp', { contactId, templateId, triggerAtISO });
-      return true;
-    }
-
-    // 2. Check if it was already fired for this exact trigger time (Prevent duplicate sends)
-    const lastResolved = db.execute(
-      `SELECT sa.status, sa.trigger_at FROM scheduled_alarms sa
-       JOIN message_queue mq ON mq.id = sa.queue_id
-       WHERE mq.contact_id=? AND mq.template_id=? ORDER BY sa.created_at DESC LIMIT 1;`,
-      [contactId, templateId],
-    ).rows?._array?.[0] || null;
-
-    if (lastResolved?.status === 'fired' && lastResolved.trigger_at === triggerAtISO) {
-      debugTrace('UpsertScheduledAlarmSkipAlreadyFired', { contactId, templateId, triggerAtISO });
-      return true;
-    }
-
-    // 3. ATOMIC CANCEL & RESCHEDULE TRANSACTION
+    // FIX 5 — Poora read-check-write ek hi transaction ke andar
     db.transaction((tx) => {
-      // --- CANCEL PHASE ---
+
+      // 1. Check if an identical schedule already exists (No-op optimization)
+      const active = tx.execute(
+        `SELECT * FROM message_queue WHERE contact_id=? AND template_id=? AND status IN ('PENDING','CLAIMED')
+         ORDER BY created_at DESC LIMIT 1;`,
+        [contactId, templateId],
+      ).rows?._array?.[0] || null;
+
+      if (active?.scheduled_for === triggerAtISO) {
+        debugTrace('UpsertScheduledAlarmNoOp', { contactId, templateId, triggerAtISO });
+        return; // Transaction se bahar, kuch nahi karna
+      }
+
+      // 2. Check if it was already fired for this exact trigger time (Prevent duplicate sends)
+      const lastResolved = tx.execute(
+        `SELECT sa.status, sa.trigger_at FROM scheduled_alarms sa
+         JOIN message_queue mq ON mq.id = sa.queue_id
+         WHERE mq.contact_id=? AND mq.template_id=? ORDER BY sa.created_at DESC LIMIT 1;`,
+        [contactId, templateId],
+      ).rows?._array?.[0] || null;
+
+      if (lastResolved?.status === 'fired' && lastResolved.trigger_at === triggerAtISO) {
+        debugTrace('UpsertScheduledAlarmSkipAlreadyFired', { contactId, templateId, triggerAtISO });
+        return; // Transaction se bahar, kuch nahi karna
+      }
+
+      // 3. CANCEL PHASE — transaction ke andar
       if (active) {
         if (active.status === 'CLAIMED') {
-          // In-flight send: Mark as SUPERSEDED so the worker can finish, 
+          // In-flight send: Mark as SUPERSEDED so the worker can finish,
           // but it frees up the unique index for the new PENDING row.
           tx.execute(`UPDATE message_queue SET status = 'SUPERSEDED' WHERE id = ?;`, [active.id]);
           logAction('message_queue', active.id, 'SUPERSEDED', { status: 'CLAIMED' }, { status: 'SUPERSEDED' });
-          
+
           // Cancel the associated alarm since we are rescheduling
           tx.execute(`UPDATE scheduled_alarms SET status = 'cancelled', updated_at = datetime('now') WHERE queue_id = ?;`, [active.id]);
           logAction('scheduled_alarms', active.id, 'CANCELLED', { status: 'scheduled' }, { status: 'cancelled' });
@@ -66,8 +78,8 @@ export const upsertScheduledAlarm = (contactId, templateId, requestCode, trigger
         }
       }
 
-      // --- RESCHEDULE PHASE ---
-      const queueId = `q_${contactId}_${templateId}_${Date.now()}`;
+      // 4. RESCHEDULE PHASE — FIX 2b: random suffix se same-millisecond collision khatam
+      const queueId = `q_${contactId}_${templateId}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
       debugTraceDbWrite('UpsertScheduledAlarmWrite', { table: 'message_queue', pk: queueId, oldState: 'none', newState: 'PENDING', contactId, templateId });
 
       try {
@@ -89,7 +101,7 @@ export const upsertScheduledAlarm = (contactId, templateId, requestCode, trigger
         [queueId, requestCode, triggerAtISO],
       );
       logAction('scheduled_alarms', queueId, 'INSERT', null, { trigger_at: triggerAtISO, request_code: requestCode });
-      
+
       debugTrace('UpsertScheduledAlarmEnd', { contactId, templateId, requestCode, queueId });
     });
 
@@ -265,23 +277,62 @@ export const getNextUpcomingAlarm = () => {
   }
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// FIX 6 — cancelAllScheduledAlarmsBy atomic banaya
+// Pehle: SELECT se list parhi, phir alag UPDATE kiya. Dono ke darmiyan koi aur
+//         alarm fire kar sakta tha — audit log mein wo action record nahi hoti.
+// Fix:   Ek hi UPDATE statement jisme WHERE clause directly condition check kare.
+//         Phir audit log ke liye affected rows parhe jayen.
+// ─────────────────────────────────────────────────────────────────────────────
 const cancelAllScheduledAlarmsBy = (column, value) => {
   try {
     const db = getDB();
-    const toCancel = db.execute(
-      `SELECT sa.id, sa.request_code, mq.contact_id, mq.template_id
-       FROM scheduled_alarms sa
-       JOIN message_queue mq ON mq.id = sa.queue_id
-       WHERE mq.${column} = ? AND sa.status = 'scheduled';`,
-      [value],
-    ).rows?._array || [];
+    let toCancel = [];
+    let confirmedIds = new Set();
 
-    if (toCancel.length) {
+    // FIX 6b — SELECT + UPDATE ab ek real db.transaction() ke andar hain, taake
+    // native side (PersistentReminderService.kt) se koi cross-process write
+    // beech mein na aa sake — pehle ka "atomic" comment sach nahi tha, do
+    // separate statements the.
+    db.transaction((tx) => {
+      toCancel = tx.execute(
+        `SELECT sa.id, sa.request_code, mq.contact_id, mq.template_id
+         FROM scheduled_alarms sa
+         JOIN message_queue mq ON mq.id = sa.queue_id
+         WHERE mq.${column} = ? AND sa.status = 'scheduled';`,
+        [value],
+      ).rows?._array || [];
+
+      if (!toCancel.length) return;
+
       const placeholders = toCancel.map(() => '?').join(',');
-      db.execute(`UPDATE scheduled_alarms SET status = 'cancelled', updated_at = datetime('now') WHERE id IN (${placeholders});`, toCancel.map((r) => r.id));
-    }
-    toCancel.forEach((row) => logAction('scheduled_alarms', String(row.id), 'CANCELLED', { status: row.status }, { status: 'cancelled' }));
-    return toCancel;
+
+      // Sirf wo rows cancel karo jo abhi bhi 'scheduled' hain. Agar SELECT aur
+      // UPDATE ke darmiyan koi 'firing' ho gaya, wo guard se skip ho jayegi.
+      db.execute(
+        `UPDATE scheduled_alarms
+         SET status = 'cancelled', updated_at = datetime('now')
+         WHERE id IN (${placeholders}) AND status = 'scheduled';`,
+        toCancel.map((r) => r.id),
+      );
+
+      // FIX 6b — Re-verify: audit log sirf un rows ke liye likho jo UPDATE ne
+      // waqai cancel ki hain. Pehle poori toCancel list unconditionally log ho
+      // rahi thi, chahe guard ne kisi row ko skip kiya ho — galat "CANCELLED"
+      // audit entry ban sakti thi us row ke liye jo asal mein cancel hi nahi hui.
+      const confirmed = db.execute(
+        `SELECT id FROM scheduled_alarms WHERE id IN (${placeholders}) AND status = 'cancelled';`,
+        toCancel.map((r) => r.id),
+      ).rows?._array || [];
+      confirmedIds = new Set(confirmed.map((r) => r.id));
+    });
+
+    const confirmedRows = toCancel.filter((row) => confirmedIds.has(row.id));
+
+    confirmedRows.forEach((row) =>
+      logAction('scheduled_alarms', String(row.id), 'CANCELLED', { status: 'scheduled' }, { status: 'cancelled' }),
+    );
+    return confirmedRows;
   } catch (error) {
     handleError(error, `cancelAllScheduledAlarmsBy_${column}`);
     return [];

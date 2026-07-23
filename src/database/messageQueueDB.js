@@ -39,7 +39,17 @@ export const addToQueueDetailed = (contactId, templateId, platformId, scheduledF
   try {
     const db = getDB();
     const alreadySentCount = countPriorSends(db, contactId, templateId);
-    const id = `${contactId}_${templateId}_${Date.now()}`;
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // FIX 2 — Queue ID same-millisecond collision
+    // Masla: `Date.now()` milliseconds deta hai. Agar do calls ek hi millisecond
+    //         mein aayein, dono ka ID bilkul ek jaisa banega. Doosra INSERT
+    //         PRIMARY KEY violation deta hai jo existing UNIQUE constraint catch
+    //         se alag hai — isliye silently DB_ERROR return hota tha.
+    // Fix:   5-char random suffix lagao taake same-millisecond calls bhi unique
+    //         IDs banayein.
+    // ─────────────────────────────────────────────────────────────────────────
+    const id = `${contactId}_${templateId}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
     const createdAtISO = getCurrentUtcISO();
     const scheduleTime = scheduledForISO || createdAtISO;
     
@@ -61,7 +71,11 @@ export const addToQueueDetailed = (contactId, templateId, platformId, scheduledF
       return { added: true, reason: 'QUEUED', queueId: id };
 
     } catch (insertError) {
-      if (insertError.message && insertError.message.includes('UNIQUE constraint failed')) {
+      // FIX 2 — Dono error types pakdo: UNIQUE constraint (active pair) aur
+      // PRIMARY KEY (theek isi waqt doosri call ne same ID bana liya — extremely
+      // rare with random suffix but still handled).
+      const msg = insertError.message ?? '';
+      if (msg.includes('UNIQUE constraint failed') || msg.includes('UNIQUE Index')) {
         debugTrace('AddToQueueDuplicateCheckResult', { traceId, contactId, templateId, duplicateCheckResult: 'ALREADY_ACTIVE' });
         debugTraceDuration('AddToQueueDetailedExit', startTime, {
           traceId, contactId, templateId, platformId, exitReason: 'already_active', added: false, reason: 'ALREADY_ACTIVE',
