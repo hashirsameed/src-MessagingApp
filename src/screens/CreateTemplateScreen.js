@@ -79,7 +79,7 @@ export default function CreateTemplateScreen({ navigation, route }) {
       }
 
       const newTemplate = {
-        id: Date.now().toString(),
+        id: `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
         title: title.trim(),
         body: body.trim(),
         days_before: parseInt(daysBefore, 10),

@@ -64,7 +64,7 @@ export default function AddContactScreen({ navigation, route }) {
       const expiryUTC = localDateTime.toISOString().replace(/\.\d{3}Z$/, 'Z');
 
       const newContact = {
-        id: Date.now().toString(),
+        id: `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
         name: name.trim(),
         phone_number: phone.trim(),
         expiry_datetime: expiryUTC,

@@ -43,7 +43,7 @@ export default function PlatformManagerScreen() {
     }
 
     const newPlatform = {
-      id: Date.now().toString(),
+      id: `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
       name: name.trim(),
       icon: icon,
       url_scheme: urlScheme.trim(),

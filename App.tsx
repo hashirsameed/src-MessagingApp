@@ -15,7 +15,24 @@ import QueueScreen from './src/screens/QueueScreen';
 import SettingsScreen from './src/screens/SettingsScreen';
 import WhatsAppConfigScreen from './src/screens/WhatsAppConfigScreen';
 import WhatsAppTemplatesScreen from './src/screens/WhatsAppTemplatesScreen';
-import DevTestScreen from './src/screens/DevTestScreen';
+
+// ─────────────────────────────────────────────────────────────────────────
+// DevTestScreen is a local-only, git-ignored dev tool (see .gitignore).
+// It will NOT exist on a fresh clone / another machine / CI, so it can't
+// be a static top-level import — that would break the Metro bundle for
+// anyone who doesn't have the file on disk. Guard it behind __DEV__ and
+// a try/catch require so its absence never breaks the build for others.
+// ─────────────────────────────────────────────────────────────────────────
+let DevTestScreen: React.ComponentType<any> | null = null;
+if (__DEV__) {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    DevTestScreen = require('./src/screens/DevTestScreen').default;
+  } catch (e) {
+    console.log('[App] DevTestScreen not found locally — skipping Testing Lab tab.');
+    DevTestScreen = null;
+  }
+}
 
 import {
   registerBackgroundScheduler,
@@ -233,7 +250,7 @@ export default function App() {
           options={{ title: 'Message Templates' }}
         />
 
-        {__DEV__ && (
+        {__DEV__ && DevTestScreen && (
           <Stack.Screen
             name="DevTestLab"
             component={DevTestScreen}

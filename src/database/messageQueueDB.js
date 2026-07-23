@@ -40,6 +40,21 @@ export const addToQueueDetailed = (contactId, templateId, platformId, scheduledF
     const db = getDB();
     const alreadySentCount = countPriorSends(db, contactId, templateId);
 
+    // FIX — alreadySentCount pehle sirf debug-log mein jaata tha, kabhi actually
+    // check nahi hota tha. Isi wajah se app restart pe runExpiryCheck() har baar
+    // isi contact+template pair ke liye fresh PENDING row bana deta tha aur
+    // processQueue() usay DOBARA bhej deta tha — chahe pehle se SENT ho chuka ho.
+    // UNIQUE index (idx_queue_active_pair) sirf PENDING/CLAIMED rows ke beech
+    // duplicate rokta hai, SENT rows ke against nahi — is leye ek explicit guard
+    // zaroori hai.
+    if (alreadySentCount > 0) {
+      debugTrace('AddToQueueAlreadySent', { traceId, contactId, templateId, alreadySentCount });
+      debugTraceDuration('AddToQueueDetailedExit', startTime, {
+        traceId, contactId, templateId, platformId, exitReason: 'already_sent', added: false, reason: 'ALREADY_SENT',
+      });
+      return { added: false, reason: 'ALREADY_SENT' };
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // FIX 2 — Queue ID same-millisecond collision
     // Masla: `Date.now()` milliseconds deta hai. Agar do calls ek hi millisecond
@@ -104,7 +119,7 @@ export const claimPendingQueue = (callerId = null, limit = 50) => {
 
     const dueRows = db.execute(
       `SELECT id FROM message_queue 
-       WHERE status = 'PENDING' AND scheduled_for <= datetime('now') 
+       WHERE status = 'PENDING' AND datetime(scheduled_for) <= datetime('now') 
        ORDER BY scheduled_for ASC LIMIT ?;`,
       [limit],
     ).rows?._array ?? [];

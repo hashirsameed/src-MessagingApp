@@ -79,7 +79,7 @@ export const upsertScheduledAlarm = (contactId, templateId, requestCode, trigger
       }
 
       // 4. RESCHEDULE PHASE — FIX 2b: random suffix se same-millisecond collision khatam
-      const queueId = `q_${contactId}_${templateId}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      const queueId = `${contactId}_${templateId}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
       debugTraceDbWrite('UpsertScheduledAlarmWrite', { table: 'message_queue', pk: queueId, oldState: 'none', newState: 'PENDING', contactId, templateId });
 
       try {
@@ -171,7 +171,7 @@ export const getDueScheduledAlarms = () => {
     const result = getDB().execute(
       `SELECT sa.id, sa.queue_id, sa.request_code, sa.trigger_at, sa.status, mq.contact_id, mq.template_id
        FROM scheduled_alarms sa JOIN message_queue mq ON mq.id = sa.queue_id
-       WHERE sa.status = 'scheduled' AND sa.trigger_at <= datetime('now') ORDER BY sa.trigger_at ASC;`,
+       WHERE sa.status = 'scheduled' AND datetime(sa.trigger_at) <= datetime('now') ORDER BY sa.trigger_at ASC;`,
     );
     return result.rows?._array || [];
   } catch (error) {

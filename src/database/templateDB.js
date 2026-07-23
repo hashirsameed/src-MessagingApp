@@ -108,7 +108,7 @@ export const cloneTemplate = (template) => {
   try {
     const db = getDB();
     const cloned = {
-      id: Date.now().toString(),
+      id: `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
       title: template.title + ' (Clone)',
       body: template.body,
       days_before: template.days_before ?? 1,
