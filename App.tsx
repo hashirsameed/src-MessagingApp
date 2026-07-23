@@ -38,7 +38,13 @@ import {
   registerBackgroundScheduler,
   runExpiryCheck,
 } from './src/utils/scheduler';
-import { runPermissionOnboardingFlow } from './src/utils/alarmScheduler';
+import {
+  runPermissionOnboardingFlow,
+  scheduleAlarmsForContact,
+  cancelAlarmsForContact,
+} from './src/utils/alarmScheduler';
+import { getActiveTemplates } from './src/database/templateDB';
+import { setContactListener } from './src/utils/contactEvents';
 
 const Stack = createNativeStackNavigator();
 const Tab = createBottomTabNavigator();
@@ -144,6 +150,22 @@ export default function App() {
       clearInterval(intervalRef.current);
       intervalRef.current = null;
     }
+  }, []);
+
+  // Signal layer — reacts to contact INSERT/UPDATE/DELETE, keeps alarms in sync.
+  useEffect(() => {
+    setContactListener(async (event: { type: string; contact?: any; contactId?: string; expiryChanged?: boolean }) => {
+      if (Platform.OS !== 'android') return;
+      const templates = getActiveTemplates();
+      if (event.type === 'INSERT') {
+        await scheduleAlarmsForContact(event.contact, templates);
+      } else if (event.type === 'UPDATE' && event.expiryChanged) {
+        await cancelAlarmsForContact(event.contact.id);
+        await scheduleAlarmsForContact(event.contact, templates);
+      } else if (event.type === 'DELETE') {
+        await cancelAlarmsForContact(event.contactId);
+      }
+    });
   }, []);
 
   useEffect(() => {

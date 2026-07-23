@@ -1,6 +1,7 @@
 import { getDB } from './db';
 import { handleError } from '../utils/errorHandler';
 import { logAction } from './auditLogDB';
+import { emitContactEvent } from '../utils/contactEvents';
 
 // ---------------------------------------------------------------------------
 // Datetime helpers — all stored/queried values are UTC ISO strings,
@@ -42,6 +43,7 @@ export const insertContact = (contact) => {
     // Mutate the in-memory object too
     contact.created_at = createdAtUTC;
     logAction('contacts', contact.id, 'INSERT', null, contact);
+    emitContactEvent({ type: 'INSERT', contact }); // signal: new contact, schedule its alarms
     return true;
   } catch (error) {
     handleError(error, 'insertContact');
@@ -63,6 +65,9 @@ export const updateContact = (contact) => {
     );
     
     logAction('contacts', contact.id, 'UPDATE', before, { ...contact, expiry_datetime: expiryUTC });
+
+    const expiryChanged = before && before.expiry_datetime !== expiryUTC; // only reschedule if expiry actually moved
+    emitContactEvent({ type: 'UPDATE', contact: { ...contact, expiry_datetime: expiryUTC }, expiryChanged });
     return true;
   } catch (error) {
     handleError(error, 'updateContact');
@@ -76,6 +81,7 @@ export const deleteContact = (id) => {
     const before = getContactById(id);
     db.execute('DELETE FROM contacts WHERE id = ?;', [id]);
     logAction('contacts', id, 'DELETE', before, null);
+    emitContactEvent({ type: 'DELETE', contactId: id }); // signal: contact gone, cancel its alarms
     return true;
   } catch (error) {
     handleError(error, 'deleteContact');
@@ -115,38 +121,5 @@ export const getContactById = (id) => {
   } catch (error) {
     handleError(error, 'getContactById');
     return null;
-  }
-};
-
-/**
- * updateContactAndReschedule — the real "user edited this contact" path.
- * Does the same DB write as updateContact(), but additionally cancels 
- * and re-schedules alarms if expiry_datetime actually changed.
- */
-export const updateContactAndReschedule = async (contact) => {
-  const before = getContactById(contact.id);
-  const expiryChanged = before && before.expiry_datetime !== toUTCISOString(contact.expiry_datetime);
-
-  const ok = updateContact(contact);
-  if (!ok) return { ok: false, rescheduled: false };
-
-  if (!expiryChanged) {
-    return { ok: true, rescheduled: false };
-  }
-
-  try {
-    // Lazy require to avoid circular dependency
-    const { cancelAlarmsForContact, scheduleAlarmsForContact } = require('../utils/alarmScheduler');
-    const { getActiveTemplates } = require('./templateDB');
-
-    await cancelAlarmsForContact(contact.id);
-    const updated = getContactById(contact.id);
-    const activeTemplates = getActiveTemplates();
-    await scheduleAlarmsForContact(updated, activeTemplates);
-    
-    return { ok: true, rescheduled: true };
-  } catch (error) {
-    handleError(error, 'updateContactAndReschedule');
-    return { ok: true, rescheduled: false };
   }
 };

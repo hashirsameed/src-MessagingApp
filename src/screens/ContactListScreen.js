@@ -1,10 +1,10 @@
 import React, { useState, useCallback } from 'react';
 import {
   View, Text, FlatList, TouchableOpacity, TextInput,
-  StyleSheet, StatusBar, Alert, Platform,
+  StyleSheet, StatusBar, Alert,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
-import { getAllContacts, deleteContact, updateContactAndReschedule } from '../database/contactDB';
+import { getAllContacts, deleteContact, updateContact } from '../database/contactDB';
 import { getAllTemplates } from '../database/templateDB';
 import { getScheduledAlarmsByContact } from '../database/scheduledAlarmDB';
 import { getDaysUntilExpiry, findMatchingTemplate } from '../utils/templateMatcher';
@@ -12,7 +12,6 @@ import { formatExpiryDate12Hour, formatDateTime12Hour, parse12HourTimeTo24Hour }
 import { validateDate, validateTime } from '../utils/validators';
 import { ErrorMessages, handleError, showError, showConfirm, showSuccess } from '../utils/errorHandler';
 import { runExpiryCheck } from '../utils/schedulerEngine';
-import { cancelAlarmsForContact } from '../utils/alarmScheduler';
 import { scanDatabase } from '../utils/dbScan';
 
 export default function ContactListScreen({ navigation }) {
@@ -61,10 +60,7 @@ export default function ContactListScreen({ navigation }) {
     refreshTestAlarms(contact.id);
   };
 
-  // Update Time — updates contacts.expiry_date / expiry_datetime AND, if
-  // the expiry actually changed, reschedules that contact's alarms via
-  // updateContactAndReschedule() (cancel old + schedule new against active
-  // templates). This is now the same path a real edit would take.
+  // Update Time — plain updateContact(); the signal layer reschedules alarms if expiry changed.
   const handleUpdateTestTime = async (contact) => {
     const dateResult = validateDate(testDate);
     const timeResult = validateTime(testTime);
@@ -87,7 +83,7 @@ export default function ContactListScreen({ navigation }) {
       }
       const expiryUTC = localDateTime.toISOString().replace(/\.\d{3}Z$/, 'Z');
 
-      const { ok, rescheduled } = await updateContactAndReschedule({
+      const ok = updateContact({
         id: contact.id,
         name: contact.name,
         phone_number: contact.phone_number,
@@ -99,10 +95,7 @@ export default function ContactListScreen({ navigation }) {
       }
       loadContacts();
       refreshTestAlarms(contact.id);
-      showSuccess(
-        'Time Updated',
-        `${contact.name}'s expiry has been updated${rescheduled ? ' and alarms rescheduled.' : ' in the database.'}`
-      );
+      showSuccess('Time Updated', `${contact.name}'s expiry has been updated.`);
     } catch (error) {
       handleError(error, 'ContactListScreen.handleUpdateTestTime');
       showError('Error', ErrorMessages.DB_WRITE);
@@ -164,25 +157,13 @@ export default function ContactListScreen({ navigation }) {
     );
   };
 
-  /**
-   * Deleting a contact must also clean up any alarms scheduled for it —
-   * otherwise AlarmManager keeps a dangling exact-alarm entry pointing at
-   * a contact that no longer exists. cancelAlarmsForContact() cancels the
-   * native alarm AND marks the scheduled_alarms row 'cancelled' (audit
-   * trail preserved, not deleted). Runs before the DB delete so we still
-   * have contact.id to look up its alarms.
-   */
+  // Deleting a contact — the signal layer cancels its alarms after DB delete succeeds.
   const handleDelete = (id, name) => {
     showConfirm(
       'Delete Contact',
       `Are you sure you want to delete "${name}"?`,
       async () => {
         try {
-          if (Platform.OS === 'android') {
-            const cancelledCount = await cancelAlarmsForContact(id);
-            console.log(`[ContactListScreen] Cancelled ${cancelledCount} alarm(s) for deleted contact ${id}`);
-          }
-
           const ok = deleteContact(id);
           if (!ok) {
             showError('Error', ErrorMessages.DB_DELETE);

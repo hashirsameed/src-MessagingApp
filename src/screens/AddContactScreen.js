@@ -4,8 +4,6 @@ import {
   StyleSheet, KeyboardAvoidingView, Platform, ScrollView, StatusBar,
 } from 'react-native';
 import { insertContact } from '../database/contactDB';
-import { getActiveTemplates } from '../database/templateDB';
-import { scheduleAlarmsForContact } from '../utils/alarmScheduler';
 import { handleError, showError, showSuccess, ErrorMessages } from '../utils/errorHandler';
 import { validateName, validatePhoneNumber, validateDate, validateTime } from '../utils/validators';
 import { parse12HourTimeTo24Hour } from '../utils/dateFormat';
@@ -76,16 +74,7 @@ export default function AddContactScreen({ navigation, route }) {
         return;
       }
 
-      // Testing hook — schedules exact alarms for this manually-added
-      // contact against all active templates. When Layer 1 (sync layer)
-      // is built later, this same call moves to the sync layer's
-      // insert/update handler; the logic here stays reusable as-is.
-      if (Platform.OS === 'android') {
-        const activeTemplates = getActiveTemplates();
-        const results = await scheduleAlarmsForContact(newContact, activeTemplates);
-        console.log(`[AddContactScreen] Scheduled ${results.length} alarm(s) for "${newContact.name}"`, results);
-      }
-
+      // Alarm scheduling now happens via the contact-events signal layer.
       route.params?.onSave?.();
       showSuccess('Contact Saved', 'Contact has been added successfully.', () => navigation.goBack());
     } catch (error) {
