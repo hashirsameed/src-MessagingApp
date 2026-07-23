@@ -82,3 +82,12 @@ yarn-error.log
 
 # Local-only QA seed data — real personal names/phone numbers, never push
 src/database/seedContacts.js
+# Test files — never push
+__tests__/
+**/__test__/
+**/*.test.js
+**/*.test.tsx
+**/*.test.ts
+
+# Dev-only test screen — never push
+src/screens/DevTestScreen.js
