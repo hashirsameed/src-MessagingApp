@@ -4,6 +4,10 @@ import { handleError } from '../utils/errorHandler';
 export const SETTINGS_KEYS = {
   DEFAULT_PLATFORM: 'default_platform', // 'sms' | 'whatsapp' | 'email' | 'gmail' | null
   SMS_PER_HOUR_LIMIT: 'sms_per_hour_limit', // number stored as string, e.g. '300'
+  // Not a standalone key — a prefix for a per-platform dynamic key
+  // (RATE_LIMIT_RETRY_PREFIX + platformId, e.g. 'retry_next_at_sms').
+  // Can't be a flat entry like the ones above since it's parameterized.
+  RATE_LIMIT_RETRY_PREFIX: 'retry_next_at_',
 };
 
 // ---------------------------------------------------------------------------
@@ -63,3 +67,21 @@ export const getSmsPerHourLimit = () => {
  */
 export const setSmsPerHourLimit = (limit) =>
   setSetting(SETTINGS_KEYS.SMS_PER_HOUR_LIMIT, limit);
+
+/**
+ * Pure UI/debug visibility for rate-limit retry-alarms (QueueScreen /
+ * dbScan.js can show "next SMS retry at X"). Purely informational — no
+ * functional logic (scheduling, resuming, dedup) depends on this value.
+ * If it goes stale after a crash, nothing breaks; it just gets
+ * overwritten or cleared on the next processQueue() run.
+ */
+export const setRateLimitRetryVisibility = (platformId, retryAtISO) =>
+  setSetting(`${SETTINGS_KEYS.RATE_LIMIT_RETRY_PREFIX}${platformId}`, retryAtISO);
+
+export const clearRateLimitRetryVisibility = (platformId) =>
+  setSetting(`${SETTINGS_KEYS.RATE_LIMIT_RETRY_PREFIX}${platformId}`, '');
+
+export const getRateLimitRetryVisibility = (platformId) => {
+  const raw = getSetting(`${SETTINGS_KEYS.RATE_LIMIT_RETRY_PREFIX}${platformId}`);
+  return raw && raw.length > 0 ? raw : null;
+};

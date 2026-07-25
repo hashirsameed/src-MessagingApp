@@ -224,7 +224,7 @@ const buildMessageBody = (toPhone, message, metaTemplateName = null, metaTemplat
  * @param {string} [metaTemplateName]
  * @param {string} [metaTemplateLanguage]
  * @param {string} [paramValue]  Value for the template's {{1}} — usually contact.name
- * @returns {Promise<{ success: boolean, error?: string }>}
+ * @returns {Promise<{ success: boolean, error?: string, httpStatus?: number|null, code?: number|null, subcode?: number|null, retryAfterMs?: number|null }>}
  */
 export const sendWhatsAppMessage = async (
   toPhone, message, traceContext = {}, metaTemplateName = null, metaTemplateLanguage = null, paramValue = null,
@@ -256,7 +256,7 @@ export const sendWhatsAppMessage = async (
         exitReason: 'no_credentials',
         success: false,
       });
-      return { success: false, error: 'NO_CREDENTIALS' };
+      return { success: false, error: 'NO_CREDENTIALS', httpStatus: null, code: null, subcode: null, retryAfterMs: null };
     }
 
     const { accessToken, phoneNumberId } = creds;
@@ -293,13 +293,28 @@ export const sendWhatsAppMessage = async (
 
     if (!response.ok) {
       const errMsg = data?.error?.message ?? `HTTP_${response.status}`;
+      const retryAfterHeader = response.headers?.get?.('Retry-After');
+      const retryAfterMs = retryAfterHeader && !isNaN(Number(retryAfterHeader))
+        ? Number(retryAfterHeader) * 1000
+        : null;
       debugTrace('SendWhatsAppMessageExit', {
         ...traceContext,
         exitReason: 'http_error',
         success: false,
         error: errMsg,
+        httpStatus: response.status,
+        errorCode: data?.error?.code ?? 'none',
+        errorSubcode: data?.error?.error_subcode ?? 'none',
+        retryAfterMs: retryAfterMs ?? 'none',
       });
-      return { success: false, error: errMsg };
+      return {
+        success: false,
+        error: errMsg,
+        httpStatus: response.status,
+        code: data?.error?.code ?? null,
+        subcode: data?.error?.error_subcode ?? null,
+        retryAfterMs,
+      };
     }
 
     debugTrace('SendWhatsAppMessageExit', {
@@ -326,7 +341,7 @@ export const sendWhatsAppMessage = async (
       success: false,
       error: error.message ?? 'NETWORK_ERROR',
     });
-    return { success: false, error: error.message ?? 'NETWORK_ERROR' };
+    return { success: false, error: error.message ?? 'NETWORK_ERROR', httpStatus: null, code: null, subcode: null, retryAfterMs: null };
   }
 };
 

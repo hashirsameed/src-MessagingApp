@@ -3,6 +3,7 @@ import { scanDatabase } from './dbScan';
 import { recordEngineRun } from '../database/engineStatusDB';
 import { rearmAllScheduledAlarmsAfterBoot, scheduleAlarmsForContact } from './alarmScheduler';
 import { processQueue } from './queueProcessor';
+import { RATE_LIMIT_RETRY_SENTINEL } from './rateLimitRetryAlarm';
 import { getAllContacts } from '../database/contactDB';
 import { getActiveTemplates } from '../database/templateDB';
 import { getDB } from '../database/db';
@@ -63,6 +64,18 @@ export const AlarmFiredTask = async (data) => {
   const { contactId, templateId } = data ?? {};
   const traceId = generateTraceId('alarmFired');
   debugTrace('AlarmFiredTaskStart', { traceId, contactId, templateId, source: 'exact_alarm' });
+
+  // Rate-limit retry alarm (see rateLimitRetryAlarm.js) — not a real
+  // contact/template pair, so skip fireScheduledPair()/scheduled_alarms
+  // entirely and go straight to flushing the queue. If that run is still
+  // rate-limited for this platform, processQueue() re-arms this same
+  // alarm itself (self-perpetuating loop) — nothing further needed here.
+  if (contactId === RATE_LIMIT_RETRY_SENTINEL) {
+    debugTrace('AlarmFiredTaskRateLimitRetry', { traceId, platformId: templateId });
+    await processQueue(undefined, traceId);
+    return;
+  }
+
   await fireScheduledPair(contactId, templateId, traceId);
 };
 

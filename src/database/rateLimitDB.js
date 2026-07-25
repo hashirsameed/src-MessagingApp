@@ -98,3 +98,34 @@ export const countSentInWindow = (platformId, windowMinutes) => {
     return 0;
   }
 };
+
+/**
+ * When will this platform's rolling window free up by (at least) one
+ * slot? Finds the OLDEST SENT row still inside the window — that row is
+ * the next one to age out — and returns oldestSentAt + windowMinutes,
+ * the exact ms timestamp at which it drops out of the window.
+ *
+ * Returns null if there's no SENT row in the window at all (nothing to
+ * wait on — rate-limit isn't actually the blocker right now).
+ */
+export const getWindowFreeAtMs = (platformId, windowMinutes) => {
+  try {
+    const db = getDB();
+    const result = db.execute(
+      `SELECT MIN(sent_at) as oldest FROM message_queue
+       WHERE platform_id = ? AND status = 'SENT'
+       AND datetime(sent_at) >= datetime('now', '-' || ? || ' minutes');`,
+      [platformId, windowMinutes],
+    );
+    const oldest = result.rows?._array?.[0]?.oldest ?? null;
+    if (!oldest) return null;
+
+    const oldestMs = new Date(oldest).getTime();
+    if (isNaN(oldestMs)) return null;
+
+    return oldestMs + windowMinutes * 60 * 1000;
+  } catch (error) {
+    handleError(error, 'getWindowFreeAtMs');
+    return null;
+  }
+};

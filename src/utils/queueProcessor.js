@@ -1,11 +1,13 @@
 import { Platform, NativeModules } from 'react-native';
 import {
-  claimPendingQueue, markAsSent, markAsFailed, revertToPending, getQueueRowById,
+  claimPendingQueue, markAsSent, markAsFailed, revertToPending,
+  revertBatchToPending, getQueueRowById,
 } from '../database/messageQueueDB';
 import { getAllContacts } from '../database/contactDB';
 import { getAllTemplates } from '../database/templateDB';
 import { getAllPlatforms } from '../database/platformDB';
 import { getRateLimit, countSentInWindow } from '../database/rateLimitDB';
+import { scheduleRateLimitRetryAlarm } from './rateLimitRetryAlarm';
 import { getDaysUntilExpiry, personalizeMessage } from './templateMatcher';
 import { handleError } from './errorHandler';
 import { debugTrace, debugTraceError, debugTraceDuration, generateTraceId } from './debugTrace';
@@ -19,7 +21,7 @@ const { AlarmModule } = NativeModules;
 // FIX 1 — processQueue concurrency lock
 // Masla: runExpiryCheck, AlarmFiredTask, aur SafetyNetTask teeno ek waqt mein
 //         processQueue() call kar sakte hain. Concurrent calls ki apni alag
-//         sentInWindow Map hoti hai, isliye rate limit galat count hoti thi.
+//         sentInWindow state hoti, isliye rate limit galat count hoti thi.
 // Fix:   Module-level _isProcessing flag. Doosri call foran return karti hai.
 // ─────────────────────────────────────────────────────────────────────────────
 let _isProcessing = false;
@@ -40,7 +42,21 @@ export const FIXED_PLATFORMS = [
   { id: 'gmail',    name: 'Gmail',    url_scheme: 'googlegmail://co?to={email}&subject={subject}&body={message}', platform_type: 'local_text' },
 ];
 
-const SMS_INTRA_SEND_DELAY_MS = 3500;
+// Fallback flat delay when a platform has no configured rate limit at all
+// (unchanged from the old single-lane behavior).
+const DEFAULT_GAP_MS = { sms: 3500, whatsapp: 1500 };
+const DEFAULT_FALLBACK_GAP_MS = 1500;
+
+// Conservative lower bound on the gap between sends, even if the configured
+// rate limit's math would allow something faster. SMS goes through Android's
+// native telephony stack (SmsManager) — real-device-safe thresholds vary by
+// manufacturer/OS version and aren't independently verified here, so this
+// stays a deliberately conservative, tunable default rather than an
+// aggressive hand-picked number. WhatsApp is a pure network call (Meta Cloud
+// API) — no telephony-stack risk, and Meta does its own burst pacing
+// server-side — so it gets a much smaller floor.
+const SAFETY_FLOOR_MS = { sms: 2000, whatsapp: 800 };
+
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const dispatchItem = async (platform, contact, message, smsPermissionGranted, waConfigured, traceContext = {}, template = null) => {
@@ -56,17 +72,219 @@ const dispatchItem = async (platform, contact, message, smsPermissionGranted, wa
   return adapter.dispatch(platform, contact, message, { smsPermissionGranted, waConfigured, traceContext, template });
 };
 
+// Dynamic, rate-limit-aware pacing: spread sends evenly across the
+// configured window instead of a flat delay, so a loose limit (e.g. "100 per
+// hour") doesn't waste most of its capacity on an unnecessarily slow flat
+// gap, and a tight limit doesn't burn through its budget in seconds. Falls
+// back to the old flat default when no rate limit is configured for this
+// platform.
+const computeMinGapMs = (platformId, rateLimit) => {
+  if (!rateLimit) return DEFAULT_GAP_MS[platformId] ?? DEFAULT_FALLBACK_GAP_MS;
+  const dynamicGapMs = (rateLimit.windowMinutes * 60 * 1000) / rateLimit.limitCount;
+  const floor = SAFETY_FLOOR_MS[platformId] ?? 0;
+  return Math.max(floor, dynamicGapMs);
+};
+
+/**
+ * Processes one platform's claimed items, start to finish, independent of
+ * every other platform's lane (see processQueue — lanes run in parallel via
+ * Promise.all). Keeps all the original per-item logic (validation,
+ * in-flight guard rail, dispatch, mark sent/failed) exactly as before;
+ * what's new here is:
+ *   - rate-limit check breaks the lane immediately with a single batch
+ *     revert instead of looping through every remaining item individually
+ *   - pacing uses computeMinGapMs() instead of a flat constant
+ *   - dispatch results are normalized: localTextAdapter still returns a
+ *     plain string ('sent' | 'opened' | 'failed_<REASON>'), while
+ *     whatsappAdapter now returns an object ({ status, ... }) so it can
+ *     carry rate-limit metadata (retryAfterMs) — both are normalized to
+ *     the same { status, ... } shape here before branching
+ */
+const processLane = async (platformId, items, ctx) => {
+  const {
+    contactMap, templateMap, platformMap, smsPermissionGranted, waConfigured,
+    traceId, summary, rateLimitedPlatformIds, retryAfterOverrides, onProgress, claimedTotal,
+  } = ctx;
+
+  const platform = platformMap.get(platformId);
+  const rateLimit = getRateLimit(platformId);
+  let currentSent = rateLimit ? countSentInWindow(platformId, rateLimit.windowMinutes) : 0;
+  const minGapMs = computeMinGapMs(platformId, rateLimit);
+
+  debugTrace('ProcessLaneStart', {
+    traceId, platformId, itemCount: items.length,
+    limitCount: rateLimit?.limitCount ?? 'none', windowMinutes: rateLimit?.windowMinutes ?? 'none',
+    currentSent, minGapMs,
+  });
+
+  for (let i = 0; i < items.length; i++) {
+    // --- RATE LIMIT CHECK — break the whole lane immediately, batch-revert ---
+    // Once currentSent >= limitCount, every remaining item in this lane will
+    // fail the exact same check (the count only rises on an actual send) —
+    // so there's no point iterating through them one at a time. One batch
+    // UPDATE instead of N individual reverts, and the lane exits cleanly so
+    // it doesn't hold up anything else (there's nothing else in this lane,
+    // but this also means we don't burn CPU on a loop known to be a no-op).
+    if (rateLimit && currentSent >= rateLimit.limitCount) {
+      const remaining = items.slice(i);
+      debugTrace('ProcessLaneRateLimitBreak', {
+        traceId, platformId, remainingCount: remaining.length,
+        currentSent, limitCount: rateLimit.limitCount, windowMinutes: rateLimit.windowMinutes,
+      });
+      revertBatchToPending(remaining.map((r) => r.id), traceId);
+      summary.rateLimited += remaining.length;
+      rateLimitedPlatformIds.add(platformId);
+      break;
+    }
+
+    const item = items[i];
+    summary.processed += 1;
+
+    const traceContext = {
+      traceId, queueId: item.id, contactId: item.contact_id, templateId: item.template_id,
+      platformId, queueStatus: item.status, itemIndex: i, itemTotal: items.length,
+    };
+    const itemStartTime = Date.now();
+    debugTrace('ProcessQueueItemStart', traceContext);
+
+    const contact  = contactMap.get(item.contact_id);
+    const template = templateMap.get(item.template_id);
+
+    // --- VALIDATION CHECKS (unchanged) ---
+    if (!contact || !template || !platform) {
+      const reason = [
+        !contact  && 'CONTACT_NOT_FOUND',
+        !template && 'TEMPLATE_NOT_FOUND',
+        !platform && 'PLATFORM_NOT_FOUND',
+      ].filter(Boolean).join('_AND_');
+      debugTrace('ProcessQueueItemValidationFailed', { ...traceContext, exitReason: reason });
+      markAsFailed(item.id, reason, traceId);
+      summary.failed += 1;
+      onProgress?.(summary.processed, claimedTotal);
+      continue;
+    }
+
+    const needsEmail = platformId === 'email' || platformId === 'gmail' || (platform.url_scheme ?? '').includes('{email}');
+    if (needsEmail && !contact.email) {
+      debugTrace('ProcessQueueItemValidationFailed', { ...traceContext, exitReason: 'email_missing_on_contact' });
+      markAsFailed(item.id, 'EMAIL_MISSING_ON_CONTACT', traceId);
+      summary.failed += 1;
+      onProgress?.(summary.processed, claimedTotal);
+      continue;
+    }
+
+    const needsPhone = platformId === 'sms' || platformId === 'whatsapp' || (platform.url_scheme ?? '').includes('{phone}');
+    if (needsPhone && !contact.phone_number) {
+      debugTrace('ProcessQueueItemValidationFailed', { ...traceContext, exitReason: 'phone_missing_on_contact' });
+      markAsFailed(item.id, 'PHONE_MISSING_ON_CONTACT', traceId);
+      summary.failed += 1;
+      onProgress?.(summary.processed, claimedTotal);
+      continue;
+    }
+
+    // ========================================================================
+    // 🚨 IN-FLIGHT GUARD RAIL (unchanged) — silent skip, no markAsFailed/Sent
+    // ========================================================================
+    const freshRow = getQueueRowById(item.id);
+    if (!freshRow || freshRow.status === 'SUPERSEDED' || freshRow.status === 'CANCELLED' || freshRow.status === 'SENT') {
+      debugTrace('ProcessQueueItemInFlightAbort', {
+        ...traceContext,
+        exitReason: 'in_flight_aborted_by_guard_rail',
+        freshStatus: freshRow?.status ?? 'DELETED_VIA_CASCADE',
+      });
+      continue;
+    }
+    // ========================================================================
+
+    let brokeLaneOnRateLimit = false;
+
+    try {
+      const daysLeft = getDaysUntilExpiry(contact.expiry_datetime);
+      const message  = personalizeMessage(template.body, contact, daysLeft);
+      debugTrace('MessagePersonalized', { ...traceContext, daysLeft, messageLength: message?.length ?? 0 });
+
+      debugTrace('DispatchItemBefore', { ...traceContext, platformId });
+      const rawResult = await dispatchItem(
+        platform, contact, message, smsPermissionGranted, waConfigured, traceContext, template,
+      );
+      debugTrace('DispatchItemAfter', { ...traceContext, rawResult });
+
+      // Normalize both adapter contracts into one shape: localTextAdapter
+      // (SMS/Email/Gmail) returns a plain string; whatsappAdapter returns an
+      // object so it can carry retryAfterMs alongside status.
+      const outcome = typeof rawResult === 'string' ? { status: rawResult } : rawResult;
+
+      if (outcome.status === 'sent') {
+        markAsSent(item.id, traceId);
+        summary.sent += 1;
+        currentSent += 1;
+        debugTrace('ProcessQueueItemOutcome', { ...traceContext, outcome: 'sent' });
+      } else if (outcome.status === 'opened') {
+        markAsSent(item.id, traceId);
+        summary.opened += 1;
+        debugTrace('ProcessQueueItemOutcome', { ...traceContext, outcome: 'opened' });
+      } else if (outcome.status === 'rate_limited_WA') {
+        // Meta itself is throttling (HTTP 429 / error 130429) — this is
+        // temporary, not a permanent failure. Revert this item AND
+        // everything else still queued in this lane (retrying them now
+        // would just hit the same throttle again), then exit the lane —
+        // the retry-alarm (armed below, in processQueue) will pick the
+        // whole batch back up once Meta's window clears.
+        revertToPending(item.id, traceId);
+        const remaining = items.slice(i + 1);
+        if (remaining.length > 0) revertBatchToPending(remaining.map((r) => r.id), traceId);
+        summary.rateLimited += 1 + remaining.length;
+        rateLimitedPlatformIds.add(platformId);
+        if (outcome.retryAfterMs) {
+          retryAfterOverrides.set(platformId, outcome.retryAfterMs);
+        }
+        debugTrace('ProcessQueueItemOutcome', {
+          ...traceContext, outcome: 'rate_limited', retryAfterMs: outcome.retryAfterMs ?? 'none',
+          remainingSkipped: remaining.length,
+        });
+        brokeLaneOnRateLimit = true;
+      } else {
+        // 'failed_permanent' (object, from WhatsApp) or legacy
+        // 'failed_<REASON>' (string, from localTextAdapter) — both permanent.
+        const reason = outcome.reason ?? (outcome.status ?? '').replace('failed_', '').toUpperCase();
+        markAsFailed(item.id, reason, traceId);
+        summary.failed += 1;
+        debugTrace('ProcessQueueItemOutcome', { ...traceContext, outcome: 'failed', failReason: reason });
+      }
+    } catch (error) {
+      debugTraceError('ProcessQueueItemCatch', error, { function: `processQueue.item.${item.id}`, ...traceContext });
+      handleError(error, `processQueue.item.${item.id}`);
+      markAsFailed(item.id, 'SEND_FAILED_UNKNOWN', traceId);
+      summary.failed += 1;
+      debugTrace('ProcessQueueItemOutcome', { ...traceContext, outcome: 'failed', failReason: 'SEND_FAILED_UNKNOWN' });
+    }
+
+    onProgress?.(summary.processed, claimedTotal);
+    debugTraceDuration('ProcessQueueItemEnd', itemStartTime, { ...traceContext, ...summary });
+
+    if (brokeLaneOnRateLimit) break;
+
+    if (i < items.length - 1) {
+      debugTrace('ProcessQueueInterItemDelayBefore', { ...traceContext, delayMs: minGapMs });
+      await delay(minGapMs);
+      debugTrace('ProcessQueueInterItemDelayAfter', { ...traceContext, delayMs: minGapMs });
+    }
+  }
+
+  debugTrace('ProcessLaneEnd', { traceId, platformId });
+};
+
 export const processQueue = async (onProgress, parentTraceId = null) => {
   // FIX 1 — Concurrency guard: agar pehle se chal raha hai to foran return karo
   if (_isProcessing) {
     debugTrace('ProcessQueueSkipped', { reason: 'already_running', parentTraceId: parentTraceId ?? 'none' });
-    return { processed: 0, sent: 0, opened: 0, failed: 0, rateLimited: 0 };
+    return { processed: 0, sent: 0, opened: 0, failed: 0, rateLimited: 0, rateLimitedPlatformIds: [] };
   }
   _isProcessing = true;
 
   const startTime = Date.now();
   const traceId = parentTraceId ?? generateTraceId('processQueue');
-  const summary = { processed: 0, sent: 0, opened: 0, failed: 0, rateLimited: 0 };
+  const summary = { processed: 0, sent: 0, opened: 0, failed: 0, rateLimited: 0, rateLimitedPlatformIds: [] };
   debugTrace('ProcessQueueStart', { traceId, parentTraceId: parentTraceId ?? 'none' });
 
   try {
@@ -103,170 +321,61 @@ export const processQueue = async (onProgress, parentTraceId = null) => {
     const waConfigured = await hasWhatsAppCredentials();
     debugTrace('HasWhatsAppCredentialsAfter', { traceId, waConfigured });
 
-    const rateLimits = new Map();
-    const sentInWindow = new Map();
-
-    const getPlatformRateLimit = (platformId) => {
-      if (!rateLimits.has(platformId)) {
-        rateLimits.set(platformId, getRateLimit(platformId));
-      }
-      return rateLimits.get(platformId);
-    };
-    const getSentInWindow = (platformId, windowMinutes) => {
-      if (!sentInWindow.has(platformId)) {
-        sentInWindow.set(platformId, countSentInWindow(platformId, windowMinutes));
-      }
-      return sentInWindow.get(platformId);
-    };
-
-    debugTrace('RateLimitState', { traceId, platforms: allPlatforms.map((p) => p.id).join(',') });
-
-    for (let i = 0; i < claimed.length; i++) {
-      const item = claimed[i];
-      const traceContext = {
-        traceId,
-        queueId: item.id,
-        contactId: item.contact_id,
-        templateId: item.template_id,
-        platformId: item.platform_id,
-        queueStatus: item.status,
-        itemIndex: i,
-        itemTotal: claimed.length,
-      };
-
-      const itemStartTime = Date.now();
-      debugTrace('ProcessQueueItemStart', traceContext);
-
-      const contact  = contactMap.get(item.contact_id);
-      const template = templateMap.get(item.template_id);
-      const platform = platformMap.get(item.platform_id);
-
-      // --- RATE LIMIT CHECK ---
-      const rateLimit = platform ? getPlatformRateLimit(platform.id) : null;
-      if (rateLimit) {
-        const currentSent = getSentInWindow(platform.id, rateLimit.windowMinutes);
-        if (currentSent >= rateLimit.limitCount) {
-          debugTrace('ProcessQueueItemRateLimited', {
-            ...traceContext, exitReason: 'platform_rate_limit_reached',
-            platformId: platform.id, currentSent,
-            limitCount: rateLimit.limitCount, windowMinutes: rateLimit.windowMinutes,
-          });
-          revertToPending(item.id, traceId);
-          summary.rateLimited += 1;
-          continue;
-        }
-      }
-
-      summary.processed += 1;
-
-      // --- VALIDATION CHECKS ---
-      if (!contact || !template || !platform) {
-        const reason = [
-          !contact  && 'CONTACT_NOT_FOUND',
-          !template && 'TEMPLATE_NOT_FOUND',
-          !platform && 'PLATFORM_NOT_FOUND',
-        ].filter(Boolean).join('_AND_');
-        debugTrace('ProcessQueueItemValidationFailed', { ...traceContext, exitReason: reason });
-        markAsFailed(item.id, reason, traceId);
-        summary.failed += 1;
-        onProgress?.(summary.processed, claimed.length);
-        continue;
-      }
-
-      const needsEmail = platform.id === 'email' || platform.id === 'gmail' || (platform.url_scheme ?? '').includes('{email}');
-      if (needsEmail && !contact.email) {
-        debugTrace('ProcessQueueItemValidationFailed', { ...traceContext, exitReason: 'email_missing_on_contact' });
-        markAsFailed(item.id, 'EMAIL_MISSING_ON_CONTACT', traceId);
-        summary.failed += 1;
-        onProgress?.(summary.processed, claimed.length);
-        continue;
-      }
-
-      const needsPhone = platform.id === 'sms' || platform.id === 'whatsapp' || (platform.url_scheme ?? '').includes('{phone}');
-      if (needsPhone && !contact.phone_number) {
-        debugTrace('ProcessQueueItemValidationFailed', { ...traceContext, exitReason: 'phone_missing_on_contact' });
-        markAsFailed(item.id, 'PHONE_MISSING_ON_CONTACT', traceId);
-        summary.failed += 1;
-        onProgress?.(summary.processed, claimed.length);
-        continue;
-      }
-
-      // ========================================================================
-      // 🚨 INDUSTRY-GRADE IN-FLIGHT GUARD RAIL
-      // Location: inside loop, right before dispatch (after validations/delays).
-      // Action: silent skip (continue). NO markAsFailed/markAsSent.
-      // States: SUPERSEDED, CANCELLED, SENT, or DELETED (!freshRow).
-      // ✅ FIXED: uses exported getQueueRowById() from messageQueueDB.js —
-      // no raw getDB()/db.execute() here, preserving DB-layering convention.
-      // ========================================================================
-      const freshRow = getQueueRowById(item.id);
-
-      if (!freshRow || freshRow.status === 'SUPERSEDED' || freshRow.status === 'CANCELLED' || freshRow.status === 'SENT') {
-        debugTrace('ProcessQueueItemInFlightAbort', {
-          ...traceContext,
-          exitReason: 'in_flight_aborted_by_guard_rail',
-          freshStatus: freshRow?.status ?? 'DELETED_VIA_CASCADE',
-        });
-        continue;
-      }
-      // ========================================================================
-
-      let isSmsAttempt = false;
-
-      try {
-        const daysLeft = getDaysUntilExpiry(contact.expiry_datetime);
-        const message  = personalizeMessage(template.body, contact, daysLeft);
-        debugTrace('MessagePersonalized', { ...traceContext, daysLeft, messageLength: message?.length ?? 0 });
-
-        isSmsAttempt = platform.id === 'sms';
-
-        debugTrace('DispatchItemBefore', { ...traceContext, platformId: platform.id });
-        const result = await dispatchItem(
-          platform, contact, message, smsPermissionGranted, waConfigured, traceContext, template,
-        );
-        debugTrace('DispatchItemAfter', { ...traceContext, result });
-
-        if (result === 'sent') {
-          markAsSent(item.id, traceId);
-          summary.sent += 1;
-          if (rateLimit) {
-            sentInWindow.set(platform.id, getSentInWindow(platform.id, rateLimit.windowMinutes) + 1);
-          }
-          debugTrace('ProcessQueueItemOutcome', { ...traceContext, outcome: 'sent' });
-        } else if (result === 'opened') {
-          markAsSent(item.id, traceId);
-          summary.opened += 1;
-          debugTrace('ProcessQueueItemOutcome', { ...traceContext, outcome: 'opened' });
-        } else {
-          const failReason = result.replace('failed_', '').toUpperCase();
-          markAsFailed(item.id, failReason, traceId);
-          summary.failed += 1;
-          debugTrace('ProcessQueueItemOutcome', { ...traceContext, outcome: 'failed', failReason });
-        }
-      } catch (error) {
-        debugTraceError('ProcessQueueItemCatch', error, { function: `processQueue.item.${item.id}`, ...traceContext });
-        handleError(error, `processQueue.item.${item.id}`);
-        markAsFailed(item.id, 'SEND_FAILED_UNKNOWN', traceId);
-        summary.failed += 1;
-        debugTrace('ProcessQueueItemOutcome', { ...traceContext, outcome: 'failed', failReason: 'SEND_FAILED_UNKNOWN' });
-      }
-
-      onProgress?.(summary.processed, claimed.length);
-      debugTraceDuration('ProcessQueueItemEnd', itemStartTime, { ...traceContext, ...summary });
-
-      if (i < claimed.length - 1) {
-        const delayMs = isSmsAttempt ? SMS_INTRA_SEND_DELAY_MS : 1500;
-        debugTrace('ProcessQueueInterItemDelayBefore', { ...traceContext, delayMs });
-        await delay(delayMs);
-        debugTrace('ProcessQueueInterItemDelayAfter', { ...traceContext, delayMs });
-      }
+    // --- Split the claimed queue into independent per-platform lanes ---
+    // SMS and WhatsApp (and any other platform) no longer wait behind each
+    // other — each lane paces and rate-limits itself, and all lanes run
+    // concurrently via Promise.all below.
+    const byPlatform = new Map();
+    for (const item of claimed) {
+      const pid = item.platform_id;
+      if (!byPlatform.has(pid)) byPlatform.set(pid, []);
+      byPlatform.get(pid).push(item);
     }
+    debugTrace('QueueSplitIntoLanes', {
+      traceId,
+      lanes: Array.from(byPlatform.entries()).map(([pid, items]) => `${pid}:${items.length}`).join(','),
+    });
+
+    // Platforms that hit their limit during this run — used after all lanes
+    // finish to arm a precise native retry-alarm per platform (see
+    // rateLimitRetryAlarm.js), instead of relying only on the next
+    // coincidental alarm/SafetyNetTask/app-foreground run.
+    const rateLimitedPlatformIds = new Set();
+    // Meta's own Retry-After (ms), captured per-platform when a WhatsApp
+    // lane hits a 429/130429 — takes priority over our own window estimate
+    // when arming that platform's retry-alarm.
+    const retryAfterOverrides = new Map();
+
+    const laneCtx = {
+      contactMap, templateMap, platformMap, smsPermissionGranted, waConfigured,
+      traceId, summary, rateLimitedPlatformIds, retryAfterOverrides,
+      onProgress, claimedTotal: claimed.length,
+    };
+
+    await Promise.all(
+      Array.from(byPlatform.entries()).map(([platformId, items]) => processLane(platformId, items, laneCtx)),
+    );
 
     if (summary.rateLimited > 0) {
       debugTrace('ProcessQueueRateLimitedSummary', {
         traceId, rateLimitedCount: summary.rateLimited, exitReason: 'deferred_for_next_run',
+        platformIds: Array.from(rateLimitedPlatformIds).join(','),
       });
+
+      // Arm one native retry-alarm per affected platform, timed for exactly
+      // when a slot frees up (or Meta's own Retry-After, if we have one).
+      // Self-perpetuating: whenever this alarm fires, it calls
+      // processQueue() again — if that run is still rate-limited, this same
+      // block re-arms it (same requestCode, so it overwrites rather than
+      // stacking). Runs independently of SafetyNetTask's ~15-min cadence,
+      // which stays as a backup in case this alarm is ever missed (reboot,
+      // cancellation).
+      for (const platformId of rateLimitedPlatformIds) {
+        await scheduleRateLimitRetryAlarm(platformId, retryAfterOverrides.get(platformId) ?? null);
+      }
     }
+
+    summary.rateLimitedPlatformIds = Array.from(rateLimitedPlatformIds);
 
     debugTraceDuration('ProcessQueueEnd', startTime, { traceId, outcome: 'completed', ...summary });
     refreshReminderSurfacesIfChanged(summary);

@@ -7,14 +7,40 @@ const formatPhone = (phone) => {
   return `92${cleaned}`;
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Rate-limit classification
+// Meta signals throttling via HTTP 429 and/or error.code === 130429 (both
+// confirmed in Meta's own Cloud API error responses). The message-text
+// fallback below is deliberately loose — it catches other rate/throughput
+// wording Meta may use that isn't captured by a specific numeric code —
+// rather than hardcoding additional numeric subcodes that haven't been
+// independently verified.
+// ─────────────────────────────────────────────────────────────────────────────
+const isRateLimitedResponse = (result) => {
+  if (result.httpStatus === 429) return true;
+  if (result.code === 130429) return true;
+  const msg = (result.error ?? '').toLowerCase();
+  return msg.includes('rate limit') || msg.includes('too many requests');
+};
+
 /**
  * dispatch — handles platform_type = 'managed_remote' (WhatsApp / Meta Cloud API).
  * ctx = { waConfigured, traceContext, template }
  * `template.meta_template_name`/`meta_template_language` (set when the
  * schedule was created — see CreateTemplateScreen) tell sendWhatsAppMessage
  * which specific APPROVED Meta template to use; contact.name fills its
- * single {{1}} parameter. Same result vocabulary as localTextAdapter:
- * 'sent' | 'failed_<REASON>'.
+ * single {{1}} parameter.
+ *
+ * Result contract (object, not a bare string — see queueProcessor.js's
+ * dispatchItem() normalization for how this coexists with localTextAdapter's
+ * plain-string contract):
+ *   { status: 'sent' }
+ *   { status: 'rate_limited_WA', retryAfterMs: number|null }
+ *   { status: 'failed_permanent', reason: string }
+ *
+ * The rate-limited case is intentionally NOT treated as a permanent failure
+ * — queueProcessor reverts it to PENDING and arms a retry-alarm, same
+ * pattern as the local SMS rate limit, instead of marking it FAILED forever.
  */
 export const dispatch = async (platform, contact, message, ctx = {}) => {
   const { waConfigured = false, traceContext = {}, template = null } = ctx;
@@ -22,9 +48,9 @@ export const dispatch = async (platform, contact, message, ctx = {}) => {
   if (!waConfigured) {
     debugTrace('DispatchItemExit', {
       ...traceContext, platformId: 'whatsapp', exitReason: 'whatsapp_not_configured',
-      result: 'failed_WHATSAPP_NOT_CONFIGURED',
+      result: 'failed_permanent:WHATSAPP_NOT_CONFIGURED',
     });
-    return 'failed_WHATSAPP_NOT_CONFIGURED';
+    return { status: 'failed_permanent', reason: 'WHATSAPP_NOT_CONFIGURED' };
   }
 
   const phone = formatPhone(contact.phone_number ?? '');
@@ -37,16 +63,26 @@ export const dispatch = async (platform, contact, message, ctx = {}) => {
   );
   debugTrace('WhatsAppRequestAfter', {
     ...traceContext, contactId: contact.id, success: result.success, error: result.error ?? '',
+    httpStatus: result.httpStatus ?? 'none', code: result.code ?? 'none',
   });
 
   if (result.success) {
     debugTrace('DispatchItemExit', { ...traceContext, platformId: 'whatsapp', outcome: 'sent' });
-    return 'sent';
+    return { status: 'sent' };
   }
 
-  const failResult = `failed_WA_${(result.error ?? 'UNKNOWN').replace(/\s+/g, '_').toUpperCase()}`;
-  debugTrace('DispatchItemExit', { ...traceContext, platformId: 'whatsapp', outcome: 'failed', result: failResult });
-  return failResult;
+  if (isRateLimitedResponse(result)) {
+    debugTrace('DispatchItemExit', {
+      ...traceContext, platformId: 'whatsapp', outcome: 'rate_limited',
+      httpStatus: result.httpStatus ?? 'none', code: result.code ?? 'none',
+      retryAfterMs: result.retryAfterMs ?? 'none',
+    });
+    return { status: 'rate_limited_WA', retryAfterMs: result.retryAfterMs ?? null };
+  }
+
+  const reason = `WA_${(result.error ?? 'UNKNOWN').replace(/\s+/g, '_').toUpperCase()}`;
+  debugTrace('DispatchItemExit', { ...traceContext, platformId: 'whatsapp', outcome: 'failed', result: reason });
+  return { status: 'failed_permanent', reason };
 };
 
 // isConfigured — exposed so queueProcessor (Step 5) can compute ctx.waConfigured
