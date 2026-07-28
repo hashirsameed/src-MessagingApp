@@ -24,10 +24,23 @@ export const getQueueRowById = (id) => {
   return result.rows?._array?.[0] ?? null;
 };
 
+// ─────────────────────────────────────────────────────────────────────────
+// Cycle-aware "already sent" check.
+// Masla: agar hum sirf contact_id+template_id ka lifetime SENT count lein,
+//         to contact ka expiry renew hone ke baad (naya cycle shuru hone
+//         par) wohi template kabhi dobara fire nahi hoga — jabke wo legitimate
+//         resend hona chahiye.
+// Fix:   Sirf un SENT rows ko count karo jo contact ke current cycle mein
+//         bheje gaye hain — yani contact ke last update (renewal) ya, agar
+//         kabhi update nahi hua, uske created_at ke baad. Purane cycle ke
+//         SENT rows naye cycle ko block nahi karte.
+// ─────────────────────────────────────────────────────────────────────────
 const countPriorSends = (db, contactId, templateId) => {
   const result = db.execute(
-    `SELECT COUNT(*) as count FROM message_queue
-     WHERE contact_id = ? AND template_id = ? AND status = 'SENT';`,
+    `SELECT COUNT(*) as count FROM message_queue mq
+     JOIN contacts c ON c.id = mq.contact_id
+     WHERE mq.contact_id = ? AND mq.template_id = ? AND mq.status = 'SENT'
+       AND datetime(mq.sent_at) >= datetime(COALESCE(c.updated_at, c.created_at));`,
     [contactId, templateId],
   );
   return result.rows?._array?.[0]?.count ?? 0;
@@ -39,6 +52,29 @@ export const addToQueueDetailed = (contactId, templateId, platformId, scheduledF
   try {
     const db = getDB();
     const alreadySentCount = countPriorSends(db, contactId, templateId);
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // FIX — Foreground resume duplicate-send bug
+    // Masla: idx_queue_active_pair UNIQUE index sirf PENDING/CLAIMED rows par
+    //         lagta hai. Jaise hi ek row SENT ho jaye, wo "active" nahi rehti,
+    //         is liye same contact_id+template_id ka naya PENDING row bilkul
+    //         insert ho sakta tha — chahe message pehle hi bhej diya gaya ho.
+    //         Result: app background→foreground aane par runExpiryCheck() ka
+    //         time-window check dobara true ho jata (kyunki wo sirf alarm time
+    //         dekhta hai, sent-status nahi), aur wahi message dobara queue +
+    //         send ho jata tha, baar baar.
+    // Fix:   alreadySentCount pehle se compute ho raha tha lekin kahin use
+    //         nahi ho raha tha — ab isko gate ki tarah use karo. Agar is
+    //         contact+template pair ke liye ek bhi SENT row maujood hai, to
+    //         naya row insert hi mat karo.
+    // ─────────────────────────────────────────────────────────────────────────
+    if (alreadySentCount > 0) {
+      debugTrace('AddToQueueDuplicateCheckResult', { traceId, contactId, templateId, duplicateCheckResult: 'ALREADY_SENT', alreadySentCount });
+      debugTraceDuration('AddToQueueDetailedExit', startTime, {
+        traceId, contactId, templateId, platformId, exitReason: 'already_sent', added: false, reason: 'ALREADY_SENT',
+      });
+      return { added: false, reason: 'ALREADY_SENT' };
+    }
 
     // ─────────────────────────────────────────────────────────────────────────
     // FIX 2 — Queue ID same-millisecond collision
@@ -102,9 +138,23 @@ export const claimPendingQueue = (callerId = null, limit = 50) => {
   try {
     const db = getDB();
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // FIX — Same-day PENDING rows never claimed
+    // Masla: scheduled_for ISO format mein store hota hai ("...T...Z"), lekin
+    //         datetime('now') SQLite ke apne format mein deta hai ("... ...",
+    //         space, no 'Z'). Raw string comparison (`scheduled_for <=
+    //         datetime('now')`) sirf tab sahi result deta jab dono dates
+    //         (calendar day) alag hon — kyunki 'T' vs space wala character
+    //         mismatch date-digits se pehle nahi aata. Same-day comparisons
+    //         mein ye hamesha FALSE aata tha, chahe waqt guzr chuka ho —
+    //         is liye aaj queue hua koi bhi message aaj kabhi claim/send
+    //         nahi hota tha, sirf agle din (date badalne par) send hota.
+    // Fix:   scheduled_for ko bhi datetime() mein wrap karo taake dono sides
+    //         same normalized format mein compare hon.
+    // ─────────────────────────────────────────────────────────────────────────
     const dueRows = db.execute(
       `SELECT id FROM message_queue 
-       WHERE status = 'PENDING' AND scheduled_for <= datetime('now') 
+       WHERE status = 'PENDING' AND datetime(scheduled_for) <= datetime('now') 
        ORDER BY scheduled_for ASC LIMIT ?;`,
       [limit],
     ).rows?._array ?? [];
@@ -289,6 +339,33 @@ export const revertBatchToPending = (ids, traceId = null) => {
     debugTraceError('RevertBatchToPendingCatch', error, { function: 'revertBatchToPending', traceId, count: ids.length });
     handleError(error, 'revertBatchToPending');
     return false;
+  }
+};
+
+/**
+ * Claim a SPECIFIC queue row by ID (not all pending rows).
+ * Used by fireScheduledPair so that one alarm firing only processes
+ * its own message, not the entire queue.
+ */
+export const claimSpecificQueueItem = (id, callerId = null) => {
+  try {
+    const db = getDB();
+    const row = getQueueRowById(id);
+
+    if (!row || row.status !== 'PENDING') return null;
+
+    const claimToken = `${callerId ?? 'unknown'}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    db.execute(
+      `UPDATE message_queue SET status = 'CLAIMED', claimed_by = ? WHERE id = ? AND status = 'PENDING';`,
+      [claimToken, id],
+    );
+
+    const result = getQueueRowById(id);
+    return result;
+  } catch (error) {
+    handleError(error, 'claimSpecificQueueItem');
+    return null;
   }
 };
 

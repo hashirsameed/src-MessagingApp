@@ -4,7 +4,6 @@ import { addToQueue } from '../database/messageQueueDB';
 import { getDefaultPlatform } from '../database/settingsDB';
 import { getDaysUntilExpiry, findMatchingTemplates } from './templateMatcher';
 import { handleError } from './errorHandler';
-import { processQueue } from './queueProcessor';
 import { isTemplateAlarmDue, computeTargetAlarmTimestamp } from './alarmScheduler';
 import { debugTrace, debugTraceError, debugTraceDuration, generateTraceId } from './debugTrace';
 
@@ -155,11 +154,16 @@ export const runExpiryCheck = async (parentTraceId = null) => {
     // stuck forever even after its rate-limit window rolled over.
     // processQueue() itself is cheap to call with nothing to do — it exits
     // immediately if claimPendingQueue() finds no PENDING rows.
-    debugTrace('RunExpiryCheckAutoProcessQueueBefore', { traceId, queued });
-    processQueue(undefined, traceId).catch((err) => {
-      debugTraceError('RunExpiryCheckAutoProcessQueueCatch', err, { function: 'runExpiryCheck.autoProcess', traceId });
-      handleError(err, 'runExpiryCheck.autoProcess');
-    });
+    // ─────────────────────────────────────────────────────────────────────────
+    // FIX — Messages ab foran send nahi hote
+    // Masla: runExpiryCheck ke baad foran processQueue() call hota tha, jis
+    //         se har message save hone ke turant baad claim + send ho jata tha
+    //         — chahe uska scheduled_for time abhi na aaya ho.
+    // Fix:   Turant processQueue() call hata diya. Messages apne scheduled_for
+    //         time par native alarm / SafetyNetTask / foreground resume ke
+    //         through process honge. claimPendingQueue() pehle se
+    //         `datetime(scheduled_for) <= datetime('now')` check lagata hai.
+    // ─────────────────────────────────────────────────────────────────────────
 
     debugTraceDuration('RunExpiryCheckEnd', startTime, { 
       traceId, 

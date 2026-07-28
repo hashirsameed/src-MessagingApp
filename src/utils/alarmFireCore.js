@@ -2,7 +2,7 @@ import { getContactById } from '../database/contactDB';
 import { getTemplateById } from '../database/templateDB';
 import { getDefaultPlatform } from '../database/settingsDB';
 import { getQueueRowById } from '../database/messageQueueDB';
-import { processQueue } from './queueProcessor';
+import { processSingleItem } from './queueProcessor';
 import {
   claimScheduledAlarmForFiring,
   releaseScheduledAlarmClaim,
@@ -95,7 +95,14 @@ export const fireScheduledPair = async (contactId, templateId, traceId) => {
       return 'skipped';
     }
 
-    await processQueue(null, traceId);
+    // ─────────────────────────────────────────────────────────────────────────
+    // FIX — Sirf is alarm ka message bhejo, poora queue nahi
+    // Masla: processQueue() saare PENDING messages claim kar leta tha —
+    //         jab ek alarm fire hota to doosre templates ke messages bhi
+    //         galat se send ho jaate the.
+    // Fix:   processSingleItem sirf is specific queue_id ka message process kare.
+    // ─────────────────────────────────────────────────────────────────────────
+    await processSingleItem(alarmRow.queue_id, traceId);
 
     markScheduledAlarmFired(contactId, templateId);
     recordEngineRun('alarmFired', { traceId, contactId, templateId, queueId: alarmRow.queue_id });

@@ -1,7 +1,7 @@
 import { Platform, NativeModules } from 'react-native';
 import {
   claimPendingQueue, markAsSent, markAsFailed, revertToPending,
-  revertBatchToPending, getQueueRowById,
+  revertBatchToPending, getQueueRowById, claimSpecificQueueItem,
 } from '../database/messageQueueDB';
 import { getAllContacts } from '../database/contactDB';
 import { getAllTemplates } from '../database/templateDB';
@@ -389,5 +389,119 @@ export const processQueue = async (onProgress, parentTraceId = null) => {
   } finally {
     // FIX 1 — Lock hamesha release karo, chahe error aaye ya na aaye
     _isProcessing = false;
+  }
+};
+
+/**
+ * Process a SINGLE queue item by ID. Used by fireScheduledPair so that
+ * one alarm firing only sends its own message, not the entire queue.
+ * Reuses the same validation + dispatch logic as processLane.
+ */
+export const processSingleItem = async (queueId, traceId = null) => {
+  const startTime = Date.now();
+  const tid = traceId ?? generateTraceId('processSingleItem');
+  debugTrace('ProcessSingleItemStart', { traceId: tid, queueId });
+
+  try {
+    const item = getQueueRowById(queueId);
+
+    if (!item) {
+      debugTrace('ProcessSingleItemNotFound', { traceId: tid, queueId });
+      return { sent: 0, failed: 0 };
+    }
+
+    // In-flight guard rail
+    if (item.status !== 'PENDING' && item.status !== 'CLAIMED') {
+      debugTrace('ProcessSingleItemSkipped', { traceId: tid, queueId, status: item.status });
+      return { sent: 0, failed: 0 };
+    }
+
+    // Claim this specific item
+    const claimed = claimSpecificQueueItem(queueId, `single-${tid}`);
+    if (!claimed) {
+      debugTrace('ProcessSingleItemClaimFailed', { traceId: tid, queueId });
+      return { sent: 0, failed: 0 };
+    }
+
+    // Load references
+    const contacts = getAllContacts();
+    const customPlatforms = getAllPlatforms();
+    const allPlatforms = [...FIXED_PLATFORMS, ...customPlatforms];
+    const templates = getAllTemplates();
+
+    const contactMap  = new Map(contacts.map((c) => [c.id, c]));
+    const templateMap = new Map(templates.map((t) => [t.id, t]));
+    const platformMap = new Map(allPlatforms.map((p) => [p.id, p]));
+
+    const contact  = contactMap.get(claimed.contact_id);
+    const template = templateMap.get(claimed.template_id);
+    const platform = platformMap.get(claimed.platform_id);
+
+    // Validation
+    if (!contact || !template || !platform) {
+      const reason = [
+        !contact  && 'CONTACT_NOT_FOUND',
+        !template && 'TEMPLATE_NOT_FOUND',
+        !platform && 'PLATFORM_NOT_FOUND',
+      ].filter(Boolean).join('_AND_');
+      debugTrace('ProcessSingleItemValidationFailed', { traceId: tid, queueId, reason });
+      markAsFailed(queueId, reason, tid);
+      return { sent: 0, failed: 1 };
+    }
+
+    const needsEmail = (claimed.platform_id === 'email' || claimed.platform_id === 'gmail')
+      || (platform.url_scheme ?? '').includes('{email}');
+    if (needsEmail && !contact.email) {
+      markAsFailed(queueId, 'EMAIL_MISSING_ON_CONTACT', tid);
+      return { sent: 0, failed: 1 };
+    }
+
+    const needsPhone = claimed.platform_id === 'sms' || claimed.platform_id === 'whatsapp'
+      || (platform.url_scheme ?? '').includes('{phone}');
+    if (needsPhone && !contact.phone_number) {
+      markAsFailed(queueId, 'PHONE_MISSING_ON_CONTACT', tid);
+      return { sent: 0, failed: 1 };
+    }
+
+    // Dispatch
+    let smsPermissionGranted = false;
+    if (Platform.OS === 'android') {
+      smsPermissionGranted = await requestSmsPermission();
+    }
+    const waConfigured = await hasWhatsAppCredentials();
+
+    const daysLeft = getDaysUntilExpiry(contact.expiry_datetime);
+    const message  = personalizeMessage(template.body, contact, daysLeft);
+
+    const traceContext = { traceId: tid, queueId, contactId: contact.id, templateId: template.id, platformId: claimed.platform_id };
+    const rawResult = await dispatchItem(
+      platform, contact, message, smsPermissionGranted, waConfigured, traceContext, template,
+    );
+
+    const outcome = typeof rawResult === 'string' ? { status: rawResult } : rawResult;
+
+    if (outcome.status === 'sent' || outcome.status === 'opened') {
+      markAsSent(queueId, tid);
+      debugTrace('ProcessSingleItemOutcome', { ...traceContext, outcome: outcome.status });
+      refreshReminderSurfacesIfChanged({ sent: 1, opened: 0, failed: 0 });
+      return { sent: 1, failed: 0 };
+    } else if (outcome.status === 'rate_limited_WA') {
+      revertToPending(queueId, tid);
+      debugTrace('ProcessSingleItemOutcome', { ...traceContext, outcome: 'rate_limited' });
+      if (outcome.retryAfterMs) {
+        await scheduleRateLimitRetryAlarm(claimed.platform_id, outcome.retryAfterMs);
+      }
+      return { sent: 0, failed: 0 };
+    } else {
+      const reason = outcome.reason ?? (outcome.status ?? '').replace('failed_', '').toUpperCase();
+      markAsFailed(queueId, reason, tid);
+      debugTrace('ProcessSingleItemOutcome', { ...traceContext, outcome: 'failed', failReason: reason });
+      return { sent: 0, failed: 1 };
+    }
+  } catch (error) {
+    debugTraceError('ProcessSingleItemCatch', error, { traceId: tid, queueId });
+    handleError(error, `processSingleItem.${queueId}`);
+    markAsFailed(queueId, 'SEND_FAILED_UNKNOWN', tid);
+    return { sent: 0, failed: 1 };
   }
 };

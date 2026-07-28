@@ -147,14 +147,18 @@ export const SafetyNetTask = async () => {
     });
 
     // Step 2 — Act: fire exactly the rows the scan identified as overdue.
+    // har alarm apna specific message process karta hai (processSingleItem),
+    // poora queue flush nahi hota.
     let processed = 0;
     for (const row of scan.overdue) {
       const outcome = await fireScheduledPair(row.contact_id, row.template_id, traceId);
       if (outcome === 'fired') processed += 1;
     }
 
-    // Step 3 — Send/retry: flush anything still sitting PENDING in the
-    // queue (e.g. rate-limited earlier).
+    // Step 3 — Safety net: sirf rate-limited items retry karo jo pehle se
+    // PENDING mein fase hain. processQueue() abhi bhi use hota hai kyunki
+    // ye rate-limit recovery ka separate concern hai — ye alarm firing
+    // ke baad ek baar chalta hai, loop ke andar nahi.
     await processQueue(undefined, traceId);
 
     recordEngineRun('safetyNet', { traceId, itemsProcessed: processed });

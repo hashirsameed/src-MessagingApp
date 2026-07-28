@@ -16,7 +16,6 @@ import { getAllTemplates } from '../database/templateDB';
 import { getAllContacts } from '../database/contactDB';
 
 const { AlarmModule } = NativeModules;
-const IMMEDIATE_ALARM_DELAY_MS = 10000;
 
 export const isAlarmModuleAvailable = () =>
   Platform.OS === 'android' &&
@@ -206,10 +205,18 @@ export const computeAlarmTimestamp = (contact, template) => {
 
   if (wasAlarmTargetBeforeContactCreated(contact, alarmMs)) return null;
 
-  if (alarmMs <= Date.now()) {
-    return Date.now() + IMMEDIATE_ALARM_DELAY_MS;
-  }
-
+  // ─────────────────────────────────────────────────────────────────────────
+  // FIX — Past templates ko original timestamp wapas do
+  // Masla: Agar multiple templates ka target time past mein hai (e.g.
+  //         dono templates ka send_time guzar chuka hai), to sab ko
+  //         `Date.now() + 10s` milta tha — sab ek saath fire hote,
+  //         sab ek saath queue + send ho jaate.
+  // Fix:   alarmMs wapas do (original target time). Is se har template
+  //         ka apna unique scheduled_for hoga, aur claimPendingQueue
+  //         sirf us template ko claim karega jiska time aa chuka hai.
+  //         fireScheduledPair ka drift check (60s tolerance) bahut
+  //         purane templates ko cancel karega jo sahi hai.
+  // ─────────────────────────────────────────────────────────────────────────
   return alarmMs;
 };
 
