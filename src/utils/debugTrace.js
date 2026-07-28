@@ -1,3 +1,5 @@
+import { isDevModeOn } from './devMode';
+
 const TRACE_PREFIX = '[TRACE]';
 
 const safeValue = (value) => {
@@ -25,12 +27,12 @@ const formatFields = (fields = {}) => {
 };
 
 export const debugTrace = (step, fields = {}) => {
-  if (!__DEV__) return;
+  if (!isDevModeOn()) return;
   console.log(`${TRACE_PREFIX} step=${step} ${formatFields(fields)}`);
 };
 
 export const debugTraceError = (step, error, fields = {}) => {
-  if (!__DEV__) return;
+  if (!isDevModeOn()) return;
   console.error(
     `${TRACE_PREFIX} step=${step} ${formatFields({
       ...fields,
@@ -47,7 +49,7 @@ export const debugTraceError = (step, error, fields = {}) => {
 // makes a normal "no internet" moment look like a crash. Use this instead
 // for anything the UI already shows a friendly, retryable message for.
 export const debugTraceRecoverable = (step, error, fields = {}) => {
-  if (!__DEV__) return;
+  if (!isDevModeOn()) return;
   console.log(
     `${TRACE_PREFIX} step=${step} ${formatFields({
       ...fields,
@@ -61,7 +63,7 @@ export const debugTraceRecoverable = (step, error, fields = {}) => {
  * oldState/newState should be status strings, e.g. PENDING → PROCESSING.
  */
 export const debugTraceDbWrite = (step, { table, pk, oldState, newState, ...rest } = {}) => {
-  if (!__DEV__) return;
+  if (!isDevModeOn()) return;
   debugTrace(step, {
     table,
     pk,
@@ -96,7 +98,7 @@ export const generateTraceId = (label = 'exec') => {
 // can spot slow steps before they approach the 30s Headless JS timeout.
 // ---------------------------------------------------------------------------
 export const debugTraceDuration = (step, startTime, fields = {}) => {
-  if (!__DEV__) return;
+  if (!isDevModeOn()) return;
   const durationMs = Date.now() - startTime;
   debugTrace(step, { ...fields, durationMs });
 };

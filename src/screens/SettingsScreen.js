@@ -4,7 +4,7 @@ import {
   StatusBar, ScrollView, Alert, ActivityIndicator, NativeModules, Platform, Switch, PermissionsAndroid,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
-import { getDefaultPlatform, setDefaultPlatform } from '../database/settingsDB';
+import { getDefaultPlatform, setDefaultPlatform, getDevMode, setDevMode } from '../database/settingsDB';
 import { getAllPlatforms, togglePlatformEnabled, seedDefaultPlatforms } from '../database/platformDB';
 import { getAllRateLimits, setRateLimit, clearRateLimit } from '../database/rateLimitDB';
 import { handleError, showError, showSuccess, ErrorMessages } from '../utils/errorHandler';
@@ -26,6 +26,7 @@ export default function SettingsScreen({ navigation }) {
   const [smsGranted, setSmsGranted]                 = useState(true);
   const [platforms, setPlatforms]                   = useState([]);
   const [expandedIds, setExpandedIds]               = useState(new Set());
+  const [devMode, setDevModeState]                 = useState(false);
 
   const loadSettings = async () => {
     try {
@@ -47,6 +48,7 @@ export default function SettingsScreen({ navigation }) {
       });
       setRateLimitDrafts(drafts);
       setPlatforms(getAllPlatforms());
+      setDevModeState(getDevMode());
       const configured = await hasWhatsAppCredentials();
       setWaConfigured(configured);
 
@@ -202,6 +204,21 @@ export default function SettingsScreen({ navigation }) {
     }
   };
 
+  const handleDevModeToggle = (value) => {
+    const ok = setDevMode(value);
+    if (ok) {
+      setDevModeState(value);
+      showSuccess(
+        value ? 'Dev Mode ON' : 'Dev Mode OFF',
+        value
+          ? 'Developer features are now visible.'
+          : 'Developer features are now hidden.',
+      );
+    } else {
+      showError('Error', 'Could not save dev mode setting.');
+    }
+  };
+
   const handleRunNow = () => {
     Alert.alert(
       'Run Check Now',
@@ -268,7 +285,7 @@ export default function SettingsScreen({ navigation }) {
                 <View style={styles.iconContainer}>
                   <Text style={styles.icon}>{platform.icon}</Text>
                 </View>
-                <Text style={styles.label}>{platform.name}</Text>
+                <Text style={styles.label} numberOfLines={1}>{platform.name}</Text>
               </TouchableOpacity>
 
               <Switch
@@ -459,8 +476,34 @@ export default function SettingsScreen({ navigation }) {
         </>
       )}
 
-      {/* ── Scheduler (Dev/Testing only — hidden in production builds) ── */}
-      {__DEV__ && (
+      {/* ── Developer Mode toggle ── */}
+      <Text style={[styles.sectionLabel, { marginTop: 28 }]}>DEVELOPER</Text>
+      <Text style={styles.sectionHint}>
+        Toggle to show or hide developer tools (manual check, testing lab, debug traces).
+      </Text>
+
+      <View style={styles.permCard}>
+        <View style={styles.permRow}>
+          <View style={styles.permIconWrap}>
+            <Text style={styles.icon}>🛠️</Text>
+          </View>
+          <View style={styles.permTextWrap}>
+            <Text style={styles.permTitle}>Developer Mode</Text>
+            <Text style={styles.permSubtitle}>
+              {devMode ? 'Active — dev tools visible' : 'Inactive — dev tools hidden'}
+            </Text>
+          </View>
+          <Switch
+            value={devMode}
+            onValueChange={handleDevModeToggle}
+            trackColor={{ false: '#E0E0E0', true: '#1A1A2E' }}
+            thumbColor="#fff"
+          />
+        </View>
+      </View>
+
+      {/* ── Scheduler (Dev/Testing only — visible when dev mode is ON) ── */}
+      {devMode && (
         <>
           <Text style={[styles.sectionLabel, { marginTop: 28 }]}>SCHEDULER (DEV ONLY)</Text>
           <Text style={styles.sectionHint}>
@@ -502,26 +545,26 @@ const styles = StyleSheet.create({
     backgroundColor: '#fff',
     paddingHorizontal: 20,
     paddingTop: 20,
-    paddingBottom: 16,
+    paddingBottom: 14,
     borderBottomWidth: 1,
     borderBottomColor: '#F0F0F0',
     marginBottom: 4,
   },
   headerTitle:    { fontSize: 28, fontWeight: '700', color: '#1A1A2E' },
-  headerSubtitle: { fontSize: 14, color: '#888', marginTop: 2 },
+  headerSubtitle: { fontSize: 13, color: '#888', marginTop: 2 },
 
   sectionLabel: {
     fontSize: 10, color: '#9E9E9E', fontWeight: '700',
-    letterSpacing: 1.5, marginHorizontal: 16, marginTop: 20, marginBottom: 6,
+    letterSpacing: 1.5, marginHorizontal: 16, marginTop: 18, marginBottom: 5,
   },
   sectionHint: {
-    fontSize: 12, color: '#9E9E9E', marginHorizontal: 16, marginBottom: 14, lineHeight: 17,
+    fontSize: 11.5, color: '#9E9E9E', marginHorizontal: 16, marginBottom: 12, lineHeight: 16,
   },
 
   // Generic card (still used by Background Reliability rows)
   card: {
-    backgroundColor: '#fff', borderRadius: 14, padding: 16,
-    marginHorizontal: 16, marginBottom: 10,
+    backgroundColor: '#fff', borderRadius: 13, padding: 13,
+    marginHorizontal: 16, marginBottom: 8,
     flexDirection: 'row', alignItems: 'center',
     borderWidth: 1.5, borderColor: '#F0F0F0',
     shadowColor: '#000', shadowOffset: { width: 0, height: 1 },
@@ -529,33 +572,33 @@ const styles = StyleSheet.create({
   },
   waCard:       { alignItems: 'center' },
   iconContainer: {
-    width: 48, height: 48, borderRadius: 12,
+    width: 40, height: 40, borderRadius: 10,
     backgroundColor: '#F8F9FA',
-    justifyContent: 'center', alignItems: 'center', marginRight: 14,
+    justifyContent: 'center', alignItems: 'center', marginRight: 12,
   },
-  icon:    { fontSize: 24 },
-  label:   { fontSize: 16, fontWeight: '600', color: '#1A1A2E' },
-  chevron: { fontSize: 22, color: '#BDBDBD', marginLeft: 8 },
+  icon:    { fontSize: 20 },
+  label:   { fontSize: 15, fontWeight: '600', color: '#1A1A2E' },
+  chevron: { fontSize: 20, color: '#BDBDBD', marginLeft: 6 },
 
-  waStatus:    { fontSize: 12, marginTop: 2 },
+  waStatus:    { fontSize: 11.5, marginTop: 2 },
   waStatusOk:  { color: '#10B981' },
   waStatusOff: { color: '#F59E0B' },
 
   radioOuter: {
-    width: 20, height: 20, borderRadius: 10,
+    width: 18, height: 18, borderRadius: 9,
     borderWidth: 2, borderColor: '#BDBDBD',
     justifyContent: 'center', alignItems: 'center',
   },
   radioOuterSelected: { borderColor: '#1A1A2E' },
-  radioInner: { width: 10, height: 10, borderRadius: 5, backgroundColor: '#1A1A2E' },
+  radioInner: { width: 9, height: 9, borderRadius: 4.5, backgroundColor: '#1A1A2E' },
   noDefaultText: {
-    fontSize: 12, color: '#9E9E9E', marginHorizontal: 16, marginTop: 8, textAlign: 'center',
+    fontSize: 11.5, color: '#9E9E9E', marginHorizontal: 16, marginTop: 6, textAlign: 'center',
   },
 
   // ── Permissions card ──
   permCard: {
-    backgroundColor: '#fff', borderRadius: 16,
-    marginHorizontal: 16, marginBottom: 10,
+    backgroundColor: '#fff', borderRadius: 14,
+    marginHorizontal: 16, marginBottom: 8,
     borderWidth: 1.5, borderColor: '#F0F0F0',
     shadowColor: '#000', shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.04, shadowRadius: 4, elevation: 2,
@@ -563,22 +606,22 @@ const styles = StyleSheet.create({
   },
   permRow: {
     flexDirection: 'row', alignItems: 'center',
-    paddingHorizontal: 16, paddingVertical: 14, gap: 12,
+    paddingHorizontal: 14, paddingVertical: 12, gap: 10,
   },
   permIconWrap: {
-    width: 40, height: 40, borderRadius: 12,
+    width: 36, height: 36, borderRadius: 10,
     backgroundColor: '#F8F9FA',
     justifyContent: 'center', alignItems: 'center',
   },
   permTextWrap:  { flex: 1 },
-  permTitle:     { fontSize: 14, fontWeight: '700', color: '#1A1A2E' },
-  permSubtitle:  { fontSize: 11.5, color: '#9CA3AF', marginTop: 2, lineHeight: 15 },
-  permDivider:   { height: 1, backgroundColor: '#F5F5F5', marginLeft: 68 },
+  permTitle:     { fontSize: 13.5, fontWeight: '700', color: '#1A1A2E' },
+  permSubtitle:  { fontSize: 11, color: '#9CA3AF', marginTop: 1, lineHeight: 14 },
+  permDivider:   { height: 1, backgroundColor: '#F5F5F5', marginLeft: 60 },
 
   // ── Accordion platform card ──
   accCard: {
-    backgroundColor: '#fff', borderRadius: 14,
-    marginHorizontal: 16, marginBottom: 10,
+    backgroundColor: '#fff', borderRadius: 13,
+    marginHorizontal: 16, marginBottom: 8,
     borderWidth: 1.5, borderColor: '#F0F0F0',
     shadowColor: '#000', shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.04, shadowRadius: 4, elevation: 2,
@@ -586,75 +629,75 @@ const styles = StyleSheet.create({
   },
   accHeader: {
     flexDirection: 'row', alignItems: 'center',
-    paddingHorizontal: 16, paddingVertical: 14, gap: 10,
+    paddingHorizontal: 14, paddingVertical: 12, gap: 8,
   },
   accHeaderMain: { flex: 1, flexDirection: 'row', alignItems: 'center' },
   accBody: {
     borderTopWidth: 1, borderTopColor: '#F5F5F5',
-    paddingHorizontal: 16, paddingTop: 14, paddingBottom: 16,
+    paddingHorizontal: 14, paddingTop: 12, paddingBottom: 14,
   },
-  accSection:      { marginBottom: 16 },
-  accSectionLabel: { fontSize: 13, fontWeight: '700', color: '#1A1A2E', marginBottom: 4 },
-  accSectionHint:  { fontSize: 12, color: '#9E9E9E', lineHeight: 17, marginBottom: 10 },
+  accSection:      { marginBottom: 14 },
+  accSectionLabel: { fontSize: 12.5, fontWeight: '700', color: '#1A1A2E', marginBottom: 3 },
+  accSectionHint:  { fontSize: 11.5, color: '#9E9E9E', lineHeight: 16, marginBottom: 8 },
 
   accRow: {
     flexDirection: 'row', alignItems: 'center',
-    paddingVertical: 10, marginBottom: 14,
+    paddingVertical: 9, marginBottom: 12,
     borderBottomWidth: 1, borderBottomColor: '#F5F5F5',
   },
-  accRowLabel: { fontSize: 14, fontWeight: '600', color: '#1A1A2E' },
+  accRowLabel: { fontSize: 13.5, fontWeight: '600', color: '#1A1A2E' },
 
   pausedNote: {
-    fontSize: 12, color: '#F59E0B', fontWeight: '600',
-    marginBottom: 14, backgroundColor: '#FFF8EB',
-    padding: 10, borderRadius: 10,
+    fontSize: 11.5, color: '#F59E0B', fontWeight: '600',
+    marginBottom: 12, backgroundColor: '#FFF8EB',
+    padding: 9, borderRadius: 9,
   },
 
-  defaultRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  defaultRowText: { fontSize: 14, fontWeight: '600', color: '#1A1A2E' },
+  defaultRow: { flexDirection: 'row', alignItems: 'center', gap: 9 },
+  defaultRowText: { fontSize: 13.5, fontWeight: '600', color: '#1A1A2E' },
 
-  rateLimitRow: { flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
+  rateLimitRow: { flexDirection: 'row', alignItems: 'center', gap: 7, flexWrap: 'wrap' },
   rateLimitCountInput: {
-    width: 64, fontSize: 15, color: '#1A1A2E', textAlign: 'center',
-    paddingVertical: 8, paddingHorizontal: 8,
-    backgroundColor: '#F8F9FA', borderRadius: 10,
+    width: 58, fontSize: 14, color: '#1A1A2E', textAlign: 'center',
+    paddingVertical: 7, paddingHorizontal: 7,
+    backgroundColor: '#F8F9FA', borderRadius: 9,
     borderWidth: 1, borderColor: '#EEEEEE',
   },
-  rateLimitPerText: { fontSize: 13, color: '#9E9E9E', fontWeight: '600' },
+  rateLimitPerText: { fontSize: 12.5, color: '#9E9E9E', fontWeight: '600' },
   rateLimitTimeInput: {
-    width: 48, fontSize: 15, color: '#1A1A2E', textAlign: 'center',
-    paddingVertical: 8, paddingHorizontal: 6,
-    backgroundColor: '#F8F9FA', borderRadius: 10,
+    width: 44, fontSize: 14, color: '#1A1A2E', textAlign: 'center',
+    paddingVertical: 7, paddingHorizontal: 5,
+    backgroundColor: '#F8F9FA', borderRadius: 9,
     borderWidth: 1, borderColor: '#EEEEEE',
   },
-  rateLimitUnitText: { fontSize: 13, color: '#9E9E9E', fontWeight: '600', marginRight: 4 },
-  rateLimitBtnRow: { flexDirection: 'row', gap: 10, marginTop: 12 },
+  rateLimitUnitText: { fontSize: 12.5, color: '#9E9E9E', fontWeight: '600', marginRight: 3 },
+  rateLimitBtnRow: { flexDirection: 'row', gap: 8, marginTop: 10 },
   rateLimitClearBtn: {
-    backgroundColor: '#FFF5F5', paddingHorizontal: 16, paddingVertical: 10,
-    borderRadius: 10, borderWidth: 1, borderColor: '#FFE0E0',
+    backgroundColor: '#FFF5F5', paddingHorizontal: 14, paddingVertical: 9,
+    borderRadius: 9, borderWidth: 1, borderColor: '#FFE0E0',
   },
-  rateLimitClearBtnText: { color: '#D32F2F', fontWeight: '600', fontSize: 13 },
+  rateLimitClearBtnText: { color: '#D32F2F', fontWeight: '600', fontSize: 12.5 },
 
   smsLimitSaveBtn: {
-    backgroundColor: '#1A1A2E', paddingHorizontal: 18,
-    paddingVertical: 10, borderRadius: 10,
+    backgroundColor: '#1A1A2E', paddingHorizontal: 16,
+    paddingVertical: 9, borderRadius: 9,
   },
-  smsLimitSaveBtnText: { color: '#fff', fontWeight: '700', fontSize: 14 },
+  smsLimitSaveBtnText: { color: '#fff', fontWeight: '700', fontSize: 13 },
 
   runBtn: {
     marginHorizontal: 16, backgroundColor: '#1A1A2E',
-    borderRadius: 14, paddingVertical: 15,
+    borderRadius: 13, paddingVertical: 13,
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
   },
   runBtnDisabled: { backgroundColor: '#BDBDBD' },
-  runBtnIcon:     { fontSize: 16 },
-  runBtnText:     { color: '#fff', fontSize: 15, fontWeight: '700' },
+  runBtnIcon:     { fontSize: 15 },
+  runBtnText:     { color: '#fff', fontSize: 14, fontWeight: '700' },
 
   labBtn: {
     flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 8,
-    marginTop: 10, marginHorizontal: 16, backgroundColor: '#EEF2FF',
-    borderRadius: 14, paddingVertical: 14, borderWidth: 1, borderColor: '#DDE3FF',
+    marginTop: 9, marginHorizontal: 16, backgroundColor: '#EEF2FF',
+    borderRadius: 13, paddingVertical: 12, borderWidth: 1, borderColor: '#DDE3FF',
   },
-  labBtnIcon: { fontSize: 15 },
-  labBtnText: { color: '#3730A3', fontSize: 14, fontWeight: '700' },
+  labBtnIcon: { fontSize: 14 },
+  labBtnText: { color: '#3730A3', fontSize: 13, fontWeight: '700' },
 });

@@ -270,16 +270,32 @@ export const getNextUpcomingAlarm = () => {
 };
 
 // cancelAllScheduledAlarmsBy — select+update in one transaction so nothing fires in between.
+//
+// FIX — linked message_queue PENDING rows ab yahan bhi khatam ho jaate hain
+// Masla: Pehle sirf scheduled_alarms.status = 'cancelled' hota tha, lekin
+//        linked message_queue row PENDING hi reh jaata tha. Koi doosra alarm
+//        ya "Run Check Now" claimPendingQueue() chala kar us PENDING row ko
+//        claim + send kar deta tha — chahe template/contact ka alarm cancel
+//        ho chuka ho (toggle off, template delete, contact delete, etc.).
+// Fix:   Same transaction ke andar, ab-tak-PENDING message_queue rows ko
+//        DELETE kiya jaata hai — bilkul waisi hi jaisi upsertScheduledAlarm()
+//        aur deleteScheduledAlarm() PENDING rows ke liye pehle se karte hain
+//        (message_queue.status CHECK constraint mein koi 'CANCELLED' value
+//        allowed nahi hai, isliye UPDATE nahi, DELETE hi sahi tareeqa hai).
+//        ON DELETE CASCADE se linked scheduled_alarms row bhi apne aap chala
+//        jaata hai. CLAIMED rows ko chhoda gaya hai — wo pehle se in-flight
+//        hain, unhe processQueue() apna course complete karne dega.
 const cancelAllScheduledAlarmsBy = (column, value) => {
   try {
     const db = getDB();
     let toCancel = [];
     let confirmedIds = new Set();
+    let deletedQueueIds = [];
 
     // Real transaction — keeps native side from writing in between select and update
     db.transaction((tx) => {
       toCancel = tx.execute(
-        `SELECT sa.id, sa.request_code, mq.contact_id, mq.template_id
+        `SELECT sa.id, sa.request_code, sa.queue_id, mq.contact_id, mq.template_id, mq.status AS queue_status
          FROM scheduled_alarms sa
          JOIN message_queue mq ON mq.id = sa.queue_id
          WHERE mq.${column} = ? AND sa.status = 'scheduled';`,
@@ -304,12 +320,34 @@ const cancelAllScheduledAlarmsBy = (column, value) => {
         toCancel.map((r) => r.id),
       ).rows?._array || [];
       confirmedIds = new Set(confirmed.map((r) => r.id));
+
+      // Delete the linked message_queue rows too — but only while they were
+      // still PENDING at the time of the SELECT above. CLAIMED means a
+      // worker is mid-send right now; leave it be, the same way
+      // upsertScheduledAlarm's SUPERSEDED path already does for a genuine
+      // in-flight race. Cascade removes the (already-cancelled) scheduled_
+      // alarms row too, so no orphan is left behind.
+      const pendingQueueIds = toCancel
+        .filter((r) => confirmedIds.has(r.id) && r.queue_status === 'PENDING')
+        .map((r) => r.queue_id);
+
+      if (pendingQueueIds.length) {
+        const qPlaceholders = pendingQueueIds.map(() => '?').join(',');
+        tx.execute(
+          `DELETE FROM message_queue WHERE id IN (${qPlaceholders}) AND status = 'PENDING';`,
+          pendingQueueIds,
+        );
+        deletedQueueIds = pendingQueueIds;
+      }
     });
 
     const confirmedRows = toCancel.filter((row) => confirmedIds.has(row.id));
 
     confirmedRows.forEach((row) =>
       logAction('scheduled_alarms', String(row.id), 'CANCELLED', { status: 'scheduled' }, { status: 'cancelled' }),
+    );
+    deletedQueueIds.forEach((queueId) =>
+      logAction('message_queue', queueId, 'DELETE', { status: 'PENDING' }, null),
     );
     return confirmedRows;
   } catch (error) {

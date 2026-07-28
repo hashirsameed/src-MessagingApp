@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useRef } from 'react';
 import { Text, AppState, Platform, NativeModules } from 'react-native';
 import { NavigationContainer } from '@react-navigation/native';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
+import { createMaterialTopTabNavigator } from '@react-navigation/material-top-tabs';
 
 import ContactListScreen from './src/screens/ContactListScreen';
 import TemplatesScreen from './src/screens/TemplatesScreen';
@@ -47,7 +48,7 @@ import { getActiveTemplates } from './src/database/templateDB';
 import { setContactListener } from './src/utils/contactEvents';
 
 const Stack = createNativeStackNavigator();
-const Tab = createBottomTabNavigator();
+const Tab = createMaterialTopTabNavigator();
 
 const FOREGROUND_CHECK_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 
@@ -69,19 +70,46 @@ const hideBackgroundTrace = () => {
 function MainTabs() {
   return (
     <Tab.Navigator
+      // Real swipeable pages between all 4 tabs, sliding tab bar
+      // positioned at the bottom (default is top for this navigator).
+      tabBarPosition="bottom"
       screenOptions={{
-        headerShown: false,
+        swipeEnabled: true,
+        animationEnabled: true,
+        tabBarShowIcon: true,
+        tabBarShowLabel: true,
+        tabBarPressColor: 'transparent',
         tabBarStyle: {
           backgroundColor: '#fff',
+          borderTopWidth: 1,
           borderTopColor: '#F0F0F0',
+          elevation: 0,
+          shadowOpacity: 0,
           height: 60,
-          paddingBottom: 8,
+        },
+        // The sliding "shade" — this bar animates continuously as you
+        // swipe/drag between tabs, not just on release, so it tracks
+        // your finger and lands under whichever tab you land on.
+        tabBarIndicatorStyle: {
+          backgroundColor: '#1A1A2E',
+          height: 3,
+          borderRadius: 2,
+        },
+        tabBarIndicatorContainerStyle: {
+          // Indicator sits at the top edge of the bottom bar — reads as
+          // a divider that slides, separating screen content from tabs.
+          top: 0,
         },
         tabBarActiveTintColor: '#1A1A2E',
         tabBarInactiveTintColor: '#BDBDBD',
         tabBarLabelStyle: {
           fontSize: 12,
           fontWeight: '600',
+          textTransform: 'none',
+          marginTop: 2,
+        },
+        tabBarItemStyle: {
+          paddingTop: 8,
         },
       }}>
       <Tab.Screen
@@ -212,6 +240,7 @@ export default function App() {
   }, [startForegroundInterval, stopForegroundInterval, triggerExpiryCheck]);
 
   return (
+    <SafeAreaProvider>
     <NavigationContainer>
       <Stack.Navigator
         screenOptions={{
@@ -281,5 +310,6 @@ export default function App() {
         )}
       </Stack.Navigator>
     </NavigationContainer>
+    </SafeAreaProvider>
   );
 }

@@ -4,6 +4,7 @@ import {
   StyleSheet, StatusBar, Platform, ScrollView, Animated, Dimensions,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { getAllTemplates, deleteTemplate, toggleTemplateActive } from '../database/templateDB';
 import { getAllContacts } from '../database/contactDB';
 import { getEnabledPlatforms, seedDefaultPlatforms } from '../database/platformDB';
@@ -19,6 +20,7 @@ const SCREEN_WIDTH = Dimensions.get('window').width;
 const WA_PAGES = ['Scheduled', 'Approved Templates'];
 
 export default function TemplatesScreen({ navigation }) {
+  const insets = useSafeAreaInsets();
   const [platforms, setPlatforms]   = useState([]);
   const [activeTab, setActiveTab]   = useState('sms');
   const [templates, setTemplates]   = useState([]);
@@ -165,16 +167,16 @@ export default function TemplatesScreen({ navigation }) {
             <Text style={styles.icon}>📝</Text>
           </View>
           <View style={styles.cardContent}>
-            <Text style={styles.title}>{item.title}</Text>
-            <Text style={styles.daysLabel}>Time: {timeLabel}</Text>
-            <Text style={styles.daysLabel}>📅 {formatDaysLabel(item.days_before)}</Text>
-            <Text style={styles.body} numberOfLines={2}>{item.body}</Text>
+            <Text style={styles.title} numberOfLines={1}>{item.title}</Text>
+            <Text style={styles.daysLabel} numberOfLines={1}>⏰ {timeLabel} · 📅 {formatDaysLabel(item.days_before)}</Text>
+            <Text style={styles.body} numberOfLines={1}>{item.body}</Text>
           </View>
           <Switch
             value={active}
             onValueChange={(v) => handleToggle(item, v)}
             trackColor={{ false: '#E0E0E0', true: '#1A1A2E' }}
             thumbColor="#fff"
+            style={styles.switchCompact}
           />
         </View>
 
@@ -306,7 +308,7 @@ export default function TemplatesScreen({ navigation }) {
                 }
               />
               <TouchableOpacity
-                style={styles.fab}
+                style={[styles.fab, { bottom: 16 + insets.bottom }]}
                 onPress={() => navigation.navigate('CreateTemplate', { presetPlatformId: 'whatsapp' })}>
                 <Text style={styles.fabText}>+ Schedule Reminder</Text>
               </TouchableOpacity>
@@ -337,7 +339,7 @@ export default function TemplatesScreen({ navigation }) {
             }
           />
           <TouchableOpacity
-            style={styles.fab}
+            style={[styles.fab, { bottom: 16 + insets.bottom }]}
             onPress={() => navigation.navigate('CreateTemplate', { presetPlatformId: activeTab })}>
             <Text style={styles.fabText}>+ New Template</Text>
           </TouchableOpacity>
@@ -349,14 +351,14 @@ export default function TemplatesScreen({ navigation }) {
 
 const styles = StyleSheet.create({
   container:      { flex: 1, backgroundColor: '#F8F9FA' },
-  header:         { backgroundColor: '#fff', paddingHorizontal: 20, paddingTop: 20, paddingBottom: 12, borderBottomWidth: 1, borderBottomColor: '#F0F0F0' },
+  header:         { backgroundColor: '#fff', paddingHorizontal: 20, paddingTop: 20, paddingBottom: 10, borderBottomWidth: 1, borderBottomColor: '#F0F0F0' },
   headerTitle:    { fontSize: 28, fontWeight: '700', color: '#1A1A2E' },
 
   tabBarWrap:     { backgroundColor: '#F8F9FA' },
-  tabBarContent:  { paddingHorizontal: 16, paddingVertical: 10, gap: 8 },
+  tabBarContent:  { paddingHorizontal: 16, paddingVertical: 8, gap: 6 },
   tab:            {
     flexDirection: 'row', alignItems: 'center', flexShrink: 0,
-    paddingHorizontal: 14, height: 34, borderRadius: 17,
+    paddingHorizontal: 12, height: 32, borderRadius: 16,
     backgroundColor: '#F8F9FA', borderWidth: 1, borderColor: '#DEE1E6',
   },
   tabActive:      { backgroundColor: '#1A1A2E', borderColor: '#1A1A2E' },
@@ -392,24 +394,25 @@ const styles = StyleSheet.create({
   waPager: { flex: 1 },
   waPage:  { width: SCREEN_WIDTH, flex: 1 },
 
-  card:           { backgroundColor: '#fff', borderRadius: 16, marginBottom: 12, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.06, shadowRadius: 8, elevation: 3 },
+  card:           { backgroundColor: '#fff', borderRadius: 14, marginBottom: 10, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.05, shadowRadius: 6, elevation: 2 },
   cardInactive:   { opacity: 0.55 },
-  cardBody:       { flexDirection: 'row', padding: 16, alignItems: 'center' },
-  iconContainer:  { width: 44, height: 44, borderRadius: 12, backgroundColor: '#F0F0F0', justifyContent: 'center', alignItems: 'center', marginRight: 12 },
-  icon:           { fontSize: 20 },
+  cardBody:       { flexDirection: 'row', padding: 12, alignItems: 'center' },
+  iconContainer:  { width: 38, height: 38, borderRadius: 10, backgroundColor: '#F0F0F0', justifyContent: 'center', alignItems: 'center', marginRight: 10 },
+  icon:           { fontSize: 17 },
   cardContent:    { flex: 1, marginRight: 8 },
-  title:          { fontSize: 15, fontWeight: '700', color: '#1A1A2E' },
-  daysLabel:      { fontSize: 11, color: '#6B7280', marginTop: 2, marginBottom: 2 },
-  body:           { fontSize: 12, color: '#9E9E9E', lineHeight: 17 },
+  title:          { fontSize: 14, fontWeight: '700', color: '#1A1A2E' },
+  daysLabel:      { fontSize: 11, color: '#6B7280', marginTop: 2 },
+  body:           { fontSize: 12, color: '#9E9E9E', marginTop: 2 },
+  switchCompact:  { transform: [{ scaleX: 0.85 }, { scaleY: 0.85 }] },
 
-  cardFooter:     { flexDirection: 'row', borderTopWidth: 1, borderTopColor: '#F5F5F5', padding: 12, gap: 8 },
-  btnEdit:        { flex: 1, backgroundColor: '#EEF2FF', paddingVertical: 9, borderRadius: 10, alignItems: 'center' },
-  btnEditText:    { color: '#3730A3', fontWeight: '600', fontSize: 13 },
-  btnDelete:      { flex: 1, backgroundColor: '#FFF5F5', paddingVertical: 9, borderRadius: 10, alignItems: 'center', borderWidth: 1, borderColor: '#FFE0E0' },
-  btnDeleteText:  { color: '#D32F2F', fontWeight: '600', fontSize: 13 },
+  cardFooter:     { flexDirection: 'row', borderTopWidth: 1, borderTopColor: '#F5F5F5', padding: 10, gap: 6 },
+  btnEdit:        { flex: 1, backgroundColor: '#EEF2FF', paddingVertical: 8, borderRadius: 9, alignItems: 'center' },
+  btnEditText:    { color: '#3730A3', fontWeight: '600', fontSize: 12 },
+  btnDelete:      { flex: 1, backgroundColor: '#FFF5F5', paddingVertical: 8, borderRadius: 9, alignItems: 'center', borderWidth: 1, borderColor: '#FFE0E0' },
+  btnDeleteText:  { color: '#D32F2F', fontWeight: '600', fontSize: 12 },
 
-  fab:            { position: 'absolute', bottom: 24, right: 20, left: 20, backgroundColor: '#1A1A2E', paddingVertical: 16, borderRadius: 14, alignItems: 'center', elevation: 5 },
-  fabText:        { color: '#fff', fontWeight: '700', fontSize: 16 },
+  fab:            { position: 'absolute', right: 20, left: 20, backgroundColor: '#1A1A2E', paddingVertical: 14, borderRadius: 14, alignItems: 'center', elevation: 5, shadowColor: '#000', shadowOffset: { width: 0, height: 3 }, shadowOpacity: 0.15, shadowRadius: 6 },
+  fabText:        { color: '#fff', fontWeight: '700', fontSize: 15 },
   emptyContainer: { alignItems: 'center', marginTop: 80 },
   emptyIcon:      { fontSize: 60, marginBottom: 16 },
   emptyTitle:     { fontSize: 20, fontWeight: '700', color: '#1A1A2E' },

@@ -165,39 +165,38 @@ export default function QueueScreen() {
         </View>
 
         {/* Contact */}
-        <Text style={styles.contactName}>
+        <Text style={styles.contactName} numberOfLines={1}>
           {contact ? contact.name : `Contact #${item.contact_id}`}
         </Text>
-        {contact?.phone_number ? <Text style={styles.contactSub}>{contact.phone_number}</Text> : null}
-        {contact?.email ? <Text style={styles.contactSub}>{contact.email}</Text> : null}
+        {contact?.phone_number ? <Text style={styles.contactSub} numberOfLines={1}>{contact.phone_number}</Text> : null}
+        {contact?.email ? <Text style={styles.contactSub} numberOfLines={1}>{contact.email}</Text> : null}
 
         {/* Template */}
-        <Text style={styles.templateName}>
+        <Text style={styles.templateName} numberOfLines={1}>
           📝 {template
             ? (template.title ?? template.name ?? `Template #${item.template_id}`)
             : `Template #${item.template_id}`}
         </Text>
 
-        {/* Timestamps */}
+        {/* Timestamps — compact icon-prefixed, one line each */}
         <View style={styles.timeRow}>
-          <Text style={styles.timeText}>Queued: {formatDateTime12Hour(item.created_at)}</Text>
-          
-          {/* ✅ ADDED: Explicitly show scheduled time for pending items to eliminate confusion */}
+          <Text style={styles.timeText} numberOfLines={1}>🕓 {formatDateTime12Hour(item.created_at)}</Text>
+
           {item.status === 'PENDING' ? (
-            <Text style={[styles.timeText, { color: meta.color, fontWeight: '600' }]}>
-              Scheduled for: {formatDateTime12Hour(item.scheduled_for)}
+            <Text style={[styles.timeText, { color: meta.color, fontWeight: '700' }]} numberOfLines={1}>
+              ⏰ {formatDateTime12Hour(item.scheduled_for)}
             </Text>
           ) : null}
 
           {item.sent_at ? (
-            <Text style={styles.timeText}>Sent: {formatDateTime12Hour(item.sent_at)}</Text>
+            <Text style={styles.timeText} numberOfLines={1}>✅ {formatDateTime12Hour(item.sent_at)}</Text>
           ) : null}
         </View>
 
         {/* Error */}
         {item.status === 'FAILED' && item.error_reason ? (
           <View style={styles.errorBox}>
-            <Text style={styles.errorText}>
+            <Text style={styles.errorText} numberOfLines={2}>
               ⚠ {item.error_reason.replace(/_/g, ' ')}
             </Text>
           </View>
@@ -349,37 +348,37 @@ const styles = StyleSheet.create({
 
   tabBar:       { flexDirection: 'row', backgroundColor: '#fff', borderBottomWidth: 1, borderBottomColor: '#F0F0F0', position: 'relative' },
   tabIndicator: { position: 'absolute', bottom: 0, left: 0, height: 2.5, width: SCREEN_WIDTH / 3 },
-  tab:          { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 14, gap: 6 },
-  tabLabel:     { fontSize: 13, fontWeight: '600', color: '#BDBDBD' },
-  tabBadge:     { borderRadius: 10, minWidth: 18, height: 18, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 5 },
+  tab:          { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 12, gap: 6 },
+  tabLabel:     { fontSize: 12, fontWeight: '600', color: '#BDBDBD' },
+  tabBadge:     { borderRadius: 9, minWidth: 17, height: 17, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 5 },
   tabBadgeText: { fontSize: 10, fontWeight: '700', color: '#fff' },
 
   pager: { flex: 1 },
   page:  { width: SCREEN_WIDTH, flex: 1 },
 
-  listContent: { padding: 16, gap: 12 },
+  listContent: { padding: 16, gap: 10 },
   emptyFlex:   { flex: 1 },
 
-  card:        { backgroundColor: '#fff', borderRadius: 12, padding: 14, marginBottom: 12, borderLeftWidth: 4, shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.06, shadowRadius: 4, elevation: 2 },
-  cardHeader:  { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
-  badge:       { borderRadius: 6, paddingHorizontal: 8, paddingVertical: 3 },
-  badgeText:   { fontSize: 11, fontWeight: '700' },
-  platformText:{ fontSize: 11, fontWeight: '700', color: '#9CA3AF', letterSpacing: 0.5 },
-  contactName: { fontSize: 15, fontWeight: '700', color: '#1A1A2E', marginBottom: 2 },
-  contactSub:  { fontSize: 12, color: '#6B7280', marginBottom: 1 },
-  templateName:{ fontSize: 12, color: '#6B7280', marginTop: 6, marginBottom: 6 },
-  timeRow:     { flexDirection: 'row', justifyContent: 'space-between', flexWrap: 'wrap', gap: 4 },
-  timeText:    { fontSize: 11, color: '#9CA3AF', flexShrink: 1 },
-  errorBox:    { marginTop: 8, backgroundColor: '#FEF2F2', borderRadius: 6, padding: 8 },
-  errorText:   { fontSize: 11, color: '#EF4444', fontWeight: '600' },
-  attemptText: { fontSize: 11, color: '#9CA3AF', marginTop: 4 },
+  card:        { backgroundColor: '#fff', borderRadius: 12, padding: 12, marginBottom: 10, borderLeftWidth: 4, shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.05, shadowRadius: 4, elevation: 2 },
+  cardHeader:  { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 },
+  badge:       { borderRadius: 6, paddingHorizontal: 7, paddingVertical: 3 },
+  badgeText:   { fontSize: 10, fontWeight: '700' },
+  platformText:{ fontSize: 10, fontWeight: '700', color: '#9CA3AF', letterSpacing: 0.5 },
+  contactName: { fontSize: 14, fontWeight: '700', color: '#1A1A2E', marginBottom: 1 },
+  contactSub:  { fontSize: 11, color: '#6B7280', marginBottom: 1 },
+  templateName:{ fontSize: 11, color: '#6B7280', marginTop: 4, marginBottom: 4 },
+  timeRow:     { flexDirection: 'row', justifyContent: 'space-between', flexWrap: 'wrap', gap: 3 },
+  timeText:    { fontSize: 10, color: '#9CA3AF', flexShrink: 1 },
+  errorBox:    { marginTop: 6, backgroundColor: '#FEF2F2', borderRadius: 6, padding: 7 },
+  errorText:   { fontSize: 10, color: '#EF4444', fontWeight: '600' },
+  attemptText: { fontSize: 10, color: '#9CA3AF', marginTop: 3 },
 
-  actionRow:    { flexDirection: 'row', gap: 8, marginTop: 10 },
-  actionBtn:    { flex: 1, borderRadius: 8, paddingVertical: 8, alignItems: 'center', justifyContent: 'center' },
+  actionRow:    { flexDirection: 'row', gap: 6, marginTop: 8 },
+  actionBtn:    { flex: 1, borderRadius: 8, paddingVertical: 7, alignItems: 'center', justifyContent: 'center' },
   retryBtn:     { backgroundColor: '#EFF6FF', borderWidth: 1, borderColor: '#3B82F6' },
-  retryBtnText: { fontSize: 12, fontWeight: '700', color: '#3B82F6' },
+  retryBtnText: { fontSize: 11, fontWeight: '700', color: '#3B82F6' },
   deleteBtn:    { backgroundColor: '#FEF2F2', borderWidth: 1, borderColor: '#EF4444' },
-  deleteBtnText:{ fontSize: 12, fontWeight: '700', color: '#EF4444' },
+  deleteBtnText:{ fontSize: 11, fontWeight: '700', color: '#EF4444' },
 
   emptyContainer: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 40 },
   emptyIcon:      { fontSize: 48, marginBottom: 16 },

@@ -4,6 +4,7 @@ import {
   StyleSheet, StatusBar, Alert,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { getAllContacts, deleteContact, updateContact } from '../database/contactDB';
 import { getAllTemplates } from '../database/templateDB';
 import { getScheduledAlarmsByContact } from '../database/scheduledAlarmDB';
@@ -13,12 +14,14 @@ import { validateDate, validateTime } from '../utils/validators';
 import { ErrorMessages, handleError, showError, showConfirm, showSuccess } from '../utils/errorHandler';
 import { runExpiryCheck } from '../utils/schedulerEngine';
 import { scanDatabase } from '../utils/dbScan';
+import { getDevMode } from '../database/settingsDB';
 
 export default function ContactListScreen({ navigation }) {
+  const insets = useSafeAreaInsets();
   const [contacts, setContacts] = useState([]);
   const [templates, setTemplates] = useState([]);
 
-  // Test panel (__DEV__ only) — which contact's panel is open, the
+  // Test panel (dev mode only) — which contact's panel is open, the
   // scheduled_alarms rows for it (read-only "already set" display), and
   // the tester's new-date/new-time inputs for the Update Time button.
   const [testOpenId, setTestOpenId] = useState(null);
@@ -212,21 +215,21 @@ export default function ContactListScreen({ navigation }) {
             <Text style={styles.avatarText}>{item.name.charAt(0).toUpperCase()}</Text>
           </View>
           <View style={styles.contactInfo}>
-            <Text style={styles.contactName}>{item.name}</Text>
-            <Text style={styles.contactPhone}>{item.phone_number}</Text>
-            <Text style={styles.contactExpiry}>Expires: {formatExpiryDate12Hour(item.expiry_datetime)}</Text>
+            <Text style={styles.contactName} numberOfLines={1}>{item.name}</Text>
+            <Text style={styles.contactPhone} numberOfLines={1}>{item.phone_number}</Text>
+            <Text style={styles.contactExpiry} numberOfLines={1}>🗓 {formatExpiryDate12Hour(item.expiry_datetime)}</Text>
           </View>
           <View style={[styles.badge, { backgroundColor: status.bg }]}>
-            <Text style={[styles.badgeText, { color: status.color }]}>{status.label}</Text>
+            <Text style={[styles.badgeText, { color: status.color }]} numberOfLines={1}>{status.label}</Text>
           </View>
         </View>
         <View style={styles.cardFooter}>
           <TouchableOpacity style={styles.btnSend} onPress={() => handleSend(item)}>
-            <Text style={styles.btnSendText}>Send Message</Text>
+            <Text style={styles.btnSendText}>Send</Text>
           </TouchableOpacity>
-          {__DEV__ && (
+          {getDevMode() && (
             <TouchableOpacity style={styles.btnTest} onPress={() => toggleTestPanel(item)}>
-              <Text style={styles.btnTestText}>{testOpenId === item.id ? 'Close Test' : 'Test'}</Text>
+              <Text style={styles.btnTestText}>{testOpenId === item.id ? 'Close' : 'Test'}</Text>
             </TouchableOpacity>
           )}
           <TouchableOpacity style={styles.btnDelete} onPress={() => handleDelete(item.id, item.name)}>
@@ -234,7 +237,7 @@ export default function ContactListScreen({ navigation }) {
           </TouchableOpacity>
         </View>
 
-        {__DEV__ && testOpenId === item.id && (
+        {getDevMode() && testOpenId === item.id && (
           <View style={styles.testPanel}>
             <Text style={styles.testPanelTitle}>Scheduled alarms (already set)</Text>
             {testAlarms.length === 0 ? (
@@ -308,7 +311,7 @@ export default function ContactListScreen({ navigation }) {
           <Text style={styles.headerSubtitle}>{contacts.length} contact{contacts.length !== 1 ? 's' : ''}</Text>
         </View>
         {/* Dev/Testing only — hidden in production builds */}
-        {__DEV__ && (
+        {getDevMode() && (
           <TouchableOpacity style={styles.checkBtn} onPress={handleCheckExpiring}>
             <Text style={styles.checkBtnText}>Check Expiring</Text>
           </TouchableOpacity>
@@ -327,7 +330,9 @@ export default function ContactListScreen({ navigation }) {
           </View>
         }
       />
-      <TouchableOpacity style={styles.fab} onPress={() => navigation.navigate('AddContact', { onSave: loadContacts })}>
+      <TouchableOpacity
+        style={[styles.fab, { bottom: 16 + insets.bottom }]}
+        onPress={() => navigation.navigate('AddContact', { onSave: loadContacts })}>
         <Text style={styles.fabText}>+ Add Contact</Text>
       </TouchableOpacity>
     </View>
@@ -357,48 +362,48 @@ const styles = StyleSheet.create({
   headerSubtitle: { fontSize: 14, color: '#888', marginTop: 2 },
   card: {
     backgroundColor: '#fff',
-    borderRadius: 16,
-    marginBottom: 12,
+    borderRadius: 14,
+    marginBottom: 10,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.06,
-    shadowRadius: 8,
-    elevation: 3,
+    shadowOpacity: 0.05,
+    shadowRadius: 6,
+    elevation: 2,
   },
-  cardHeader: { flexDirection: 'row', alignItems: 'center', padding: 16 },
+  cardHeader: { flexDirection: 'row', alignItems: 'center', padding: 12 },
   avatar: {
-    width: 48, height: 48, borderRadius: 24,
+    width: 40, height: 40, borderRadius: 20,
     backgroundColor: '#1A1A2E', justifyContent: 'center', alignItems: 'center',
-    marginRight: 12,
+    marginRight: 10,
   },
-  avatarText: { color: '#fff', fontSize: 20, fontWeight: '700' },
-  contactInfo: { flex: 1 },
-  contactName: { fontSize: 16, fontWeight: '600', color: '#1A1A2E' },
-  contactPhone: { fontSize: 13, color: '#666', marginTop: 2 },
-  contactExpiry: { fontSize: 12, color: '#999', marginTop: 2, flexShrink: 1 },
-  badge: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 20 },
-  badgeText: { fontSize: 11, fontWeight: '600' },
+  avatarText: { color: '#fff', fontSize: 16, fontWeight: '700' },
+  contactInfo: { flex: 1, marginRight: 8 },
+  contactName: { fontSize: 15, fontWeight: '600', color: '#1A1A2E' },
+  contactPhone: { fontSize: 12, color: '#666', marginTop: 1 },
+  contactExpiry: { fontSize: 11, color: '#999', marginTop: 1 },
+  badge: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 20, maxWidth: 96 },
+  badgeText: { fontSize: 10, fontWeight: '600' },
   cardFooter: {
     flexDirection: 'row', borderTopWidth: 1,
-    borderTopColor: '#F5F5F5', padding: 12, gap: 8,
+    borderTopColor: '#F5F5F5', padding: 10, gap: 6,
   },
   btnSend: {
     flex: 1, backgroundColor: '#1A1A2E',
-    paddingVertical: 10, borderRadius: 10, alignItems: 'center',
+    paddingVertical: 9, borderRadius: 9, alignItems: 'center',
   },
-  btnSendText: { color: '#fff', fontWeight: '600', fontSize: 14 },
+  btnSendText: { color: '#fff', fontWeight: '600', fontSize: 13 },
   btnDelete: {
-    paddingHorizontal: 16, paddingVertical: 10,
-    borderRadius: 10, alignItems: 'center',
+    paddingHorizontal: 14, paddingVertical: 9,
+    borderRadius: 9, alignItems: 'center',
     borderWidth: 1, borderColor: '#FFE0E0', backgroundColor: '#FFF5F5',
   },
-  btnDeleteText: { color: '#D32F2F', fontWeight: '600', fontSize: 14 },
+  btnDeleteText: { color: '#D32F2F', fontWeight: '600', fontSize: 13 },
   btnTest: {
-    paddingHorizontal: 14, paddingVertical: 10,
-    borderRadius: 10, alignItems: 'center',
+    paddingHorizontal: 12, paddingVertical: 9,
+    borderRadius: 9, alignItems: 'center',
     borderWidth: 1, borderColor: '#E0E0F0', backgroundColor: '#F4F4FB',
   },
-  btnTestText: { color: '#4A4A8A', fontWeight: '600', fontSize: 14 },
+  btnTestText: { color: '#4A4A8A', fontWeight: '600', fontSize: 13 },
   testPanel: {
     margin: 12, marginTop: 0, padding: 14,
     borderRadius: 12, backgroundColor: '#FAFAFC',
@@ -440,11 +445,12 @@ const styles = StyleSheet.create({
   },
   btnScanText: { color: '#fff', fontWeight: '600', fontSize: 13 },
   fab: {
-    position: 'absolute', bottom: 24, right: 20, left: 20,
-    backgroundColor: '#1A1A2E', paddingVertical: 16,
+    position: 'absolute', right: 20, left: 20,
+    backgroundColor: '#1A1A2E', paddingVertical: 14,
     borderRadius: 14, alignItems: 'center', elevation: 5,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 3 }, shadowOpacity: 0.15, shadowRadius: 6,
   },
-  fabText: { color: '#fff', fontWeight: '700', fontSize: 16 },
+  fabText: { color: '#fff', fontWeight: '700', fontSize: 15 },
   emptyContainer: { alignItems: 'center', marginTop: 80 },
   emptyIcon: { fontSize: 60, marginBottom: 16 },
   emptyTitle: { fontSize: 20, fontWeight: '700', color: '#1A1A2E' },

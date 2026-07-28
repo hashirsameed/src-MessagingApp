@@ -206,17 +206,35 @@ export const computeAlarmTimestamp = (contact, template) => {
   if (wasAlarmTargetBeforeContactCreated(contact, alarmMs)) return null;
 
   // ─────────────────────────────────────────────────────────────────────────
-  // FIX — Past templates ko original timestamp wapas do
-  // Masla: Agar multiple templates ka target time past mein hai (e.g.
-  //         dono templates ka send_time guzar chuka hai), to sab ko
-  //         `Date.now() + 10s` milta tha — sab ek saath fire hote,
-  //         sab ek saath queue + send ho jaate.
-  // Fix:   alarmMs wapas do (original target time). Is se har template
-  //         ka apna unique scheduled_for hoga, aur claimPendingQueue
-  //         sirf us template ko claim karega jiska time aa chuka hai.
-  //         fireScheduledPair ka drift check (60s tolerance) bahut
-  //         purane templates ko cancel karega jo sahi hai.
+  // FIX — Overdue (already-past) targets ko native exact alarm ke liye
+  // schedule mat karo
+  // Masla: Contact create/edit hote hi scheduleAlarmsForContact() saare
+  //         active templates ke liye computeAlarmTimestamp() call karta hai
+  //         — bina ye check kiye ke us template ka target time already guzar
+  //         chuka hai ya nahi (e.g. "tomorrow" ya "N-days-left" template ka
+  //         target, jab contact purana ho ya expiry edit ki gayi ho). Ye
+  //         past timestamp AlarmModule.scheduleExactAlarm() ko chala jaata,
+  //         aur Android ka setExactAndAllowWhileIdle() past waqt milte hi
+  //         alarm turant (kuch seconds mein) fire kar deta — is se galat
+  //         template ka message foran chala jaata, sirf isliye ke uska
+  //         "due" din/waqt kabhi na kabhi guzar chuka tha, na ke isliye ke
+  //         woh aaj ke daysLeft se match karta tha. Ye send_time-wale aur
+  //         send_time-less (jo expiry ke exact waqt chalte hain) dono
+  //         templates ko barabar affect karta tha, kyunki dono
+  //         computeTargetAlarmTimestamp() ke isi ek path se guzarte hain.
+  // Fix:   Agar target ab (Date.now()) se pehle ka hai to native alarm ke
+  //         liye null return karo — is template ke liye koi exact alarm
+  //         schedule nahi hoga. Iska matlab ye nahi ke message kabhi nahi
+  //         jayega: agar template genuinely "due" hai (aaj ke daysLeft se
+  //         match karta hai), to schedulerEngine.js ka runExpiryCheck() —
+  //         jo already daysLeft + time-window (1hr grace period) ke sath
+  //         match karta hai — agle cycle mein usay sahi tarah se queue kar
+  //         dega. Genuinely overdue/wrong-day templates (jinka din guzar
+  //         chuka) is window se bahar reh jaayenge aur skip ho jaayenge —
+  //         yehi correct behavior hai.
   // ─────────────────────────────────────────────────────────────────────────
+  if (alarmMs < Date.now()) return null;
+
   return alarmMs;
 };
 
