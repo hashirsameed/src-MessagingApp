@@ -102,6 +102,7 @@ const ensureSchema = (db) => {
   // Layer B Locked Decision: Atomic deduplication strictly on active statuses
   db.execute(`CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_active_pair ON message_queue(contact_id, template_id) WHERE status IN ('PENDING','CLAIMED');`);
   db.execute(`CREATE INDEX IF NOT EXISTS idx_queue_delta_processing ON message_queue(status, scheduled_for);`);
+  db.execute(`CREATE INDEX IF NOT EXISTS idx_queue_status_sent ON message_queue(status, sent_at);`);
 
   // 7. scheduled_alarms (Layer B Core: 1:1 linkage via queue_id)
   db.execute(`CREATE TABLE IF NOT EXISTS scheduled_alarms (

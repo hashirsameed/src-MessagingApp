@@ -7,6 +7,7 @@ import { getAllContacts } from '../database/contactDB';
 import { getAllTemplates } from '../database/templateDB';
 import { getAllPlatforms } from '../database/platformDB';
 import { getRateLimit, countSentInWindow } from '../database/rateLimitDB';
+import { getInFlightCount, reserveSlot, releaseSlot } from './rateLimitReservation';
 import { scheduleRateLimitRetryAlarm } from './rateLimitRetryAlarm';
 import { getDaysUntilExpiry, personalizeMessage } from './templateMatcher';
 import { handleError } from './errorHandler';
@@ -108,23 +109,26 @@ const processLane = async (platformId, items, ctx) => {
 
   const platform = platformMap.get(platformId);
   const rateLimit = getRateLimit(platformId);
-  let currentSent = rateLimit ? countSentInWindow(platformId, rateLimit.windowMinutes) : 0;
   const minGapMs = computeMinGapMs(platformId, rateLimit);
 
   debugTrace('ProcessLaneStart', {
     traceId, platformId, itemCount: items.length,
     limitCount: rateLimit?.limitCount ?? 'none', windowMinutes: rateLimit?.windowMinutes ?? 'none',
-    currentSent, minGapMs,
+    minGapMs,
   });
 
   for (let i = 0; i < items.length; i++) {
     // --- RATE LIMIT CHECK — break the whole lane immediately, batch-revert ---
-    // Once currentSent >= limitCount, every remaining item in this lane will
-    // fail the exact same check (the count only rises on an actual send) —
-    // so there's no point iterating through them one at a time. One batch
-    // UPDATE instead of N individual reverts, and the lane exits cleanly so
-    // it doesn't hold up anything else (there's nothing else in this lane,
-    // but this also means we don't burn CPU on a loop known to be a no-op).
+    // Recomputed fresh each iteration (dbSent + inFlight, not a cached
+    // local counter) so this sees reservations made by a *concurrent*
+    // processSingleItem() call for the same platform (e.g. a native
+    // alarm firing mid-batch) — a cached counter would miss those and
+    // let this lane over-send past the limit.
+    let currentSent = 0;
+    if (rateLimit) {
+      currentSent = countSentInWindow(platformId, rateLimit.windowMinutes)
+        + getInFlightCount(platformId, rateLimit.windowMinutes);
+    }
     if (rateLimit && currentSent >= rateLimit.limitCount) {
       const remaining = items.slice(i);
       debugTrace('ProcessLaneRateLimitBreak', {
@@ -197,6 +201,7 @@ const processLane = async (platformId, items, ctx) => {
     // ========================================================================
 
     let brokeLaneOnRateLimit = false;
+    const reservationId = rateLimit ? reserveSlot(platformId) : null;
 
     try {
       const daysLeft = getDaysUntilExpiry(contact.expiry_datetime);
@@ -204,9 +209,16 @@ const processLane = async (platformId, items, ctx) => {
       debugTrace('MessagePersonalized', { ...traceContext, daysLeft, messageLength: message?.length ?? 0 });
 
       debugTrace('DispatchItemBefore', { ...traceContext, platformId });
-      const rawResult = await dispatchItem(
-        platform, contact, message, smsPermissionGranted, waConfigured, traceContext, template,
-      );
+      let rawResult;
+      try {
+        rawResult = await dispatchItem(
+          platform, contact, message, smsPermissionGranted, waConfigured, traceContext, template,
+        );
+      } finally {
+        // Release the moment dispatch resolves (or throws) — DB state now
+        // reflects reality, no need to keep holding the in-flight slot.
+        if (reservationId !== null) releaseSlot(platformId, reservationId);
+      }
       debugTrace('DispatchItemAfter', { ...traceContext, rawResult });
 
       // Normalize both adapter contracts into one shape: localTextAdapter
@@ -217,7 +229,6 @@ const processLane = async (platformId, items, ctx) => {
       if (outcome.status === 'sent') {
         markAsSent(item.id, traceId);
         summary.sent += 1;
-        currentSent += 1;
         debugTrace('ProcessQueueItemOutcome', { ...traceContext, outcome: 'sent' });
       } else if (outcome.status === 'opened') {
         markAsSent(item.id, traceId);
@@ -423,6 +434,35 @@ export const processSingleItem = async (queueId, traceId = null) => {
       return { sent: 0, failed: 0 };
     }
 
+    // --- RATE LIMIT CHECK — same guard processLane() applies, but here for
+    // a single item since fireScheduledPair goes straight through this
+    // path (native alarm → one item), never through processLane. Without
+    // this, an exact-alarm-triggered send would bypass the configured
+    // limit entirely for every platform except WhatsApp's own post-hoc
+    // 429 (rate_limited_WA) — e.g. SMS had no pre-send limit check here.
+    //
+    // dbSent + inFlight (not just dbSent) — two alarms firing close
+    // together would otherwise both read the same DB count before either
+    // finishes its (slow, async) dispatch and both pass. reserveSlot()
+    // happens in this same synchronous block, so no other concurrent call
+    // can slip in between the check and the reservation. ---
+    const rateLimit = getRateLimit(claimed.platform_id);
+    let reservationId = null;
+    if (rateLimit) {
+      const dbSent = countSentInWindow(claimed.platform_id, rateLimit.windowMinutes);
+      const inFlight = getInFlightCount(claimed.platform_id, rateLimit.windowMinutes);
+      if (dbSent + inFlight >= rateLimit.limitCount) {
+        debugTrace('ProcessSingleItemRateLimited', {
+          traceId: tid, queueId, platformId: claimed.platform_id,
+          dbSent, inFlight, limitCount: rateLimit.limitCount, windowMinutes: rateLimit.windowMinutes,
+        });
+        revertToPending(queueId, tid);
+        await scheduleRateLimitRetryAlarm(claimed.platform_id);
+        return { sent: 0, failed: 0 };
+      }
+      reservationId = reserveSlot(claimed.platform_id);
+    }
+
     // Load references
     const contacts = getAllContacts();
     const customPlatforms = getAllPlatforms();
@@ -465,18 +505,27 @@ export const processSingleItem = async (queueId, traceId = null) => {
 
     // Dispatch
     let smsPermissionGranted = false;
-    if (Platform.OS === 'android') {
-      smsPermissionGranted = await requestSmsPermission();
+    let rawResult;
+    let traceContext;
+    try {
+      if (Platform.OS === 'android') {
+        smsPermissionGranted = await requestSmsPermission();
+      }
+      const waConfigured = await hasWhatsAppCredentials();
+
+      const daysLeft = getDaysUntilExpiry(contact.expiry_datetime);
+      const message  = personalizeMessage(template.body, contact, daysLeft);
+
+      traceContext = { traceId: tid, queueId, contactId: contact.id, templateId: template.id, platformId: claimed.platform_id };
+      rawResult = await dispatchItem(
+        platform, contact, message, smsPermissionGranted, waConfigured, traceContext, template,
+      );
+    } finally {
+      // Release no matter what happens above — a thrown error here would
+      // otherwise leak the slot until pruneExpired's window-based cleanup
+      // eventually clears it, temporarily under-counting real capacity.
+      if (reservationId !== null) releaseSlot(claimed.platform_id, reservationId);
     }
-    const waConfigured = await hasWhatsAppCredentials();
-
-    const daysLeft = getDaysUntilExpiry(contact.expiry_datetime);
-    const message  = personalizeMessage(template.body, contact, daysLeft);
-
-    const traceContext = { traceId: tid, queueId, contactId: contact.id, templateId: template.id, platformId: claimed.platform_id };
-    const rawResult = await dispatchItem(
-      platform, contact, message, smsPermissionGranted, waConfigured, traceContext, template,
-    );
 
     const outcome = typeof rawResult === 'string' ? { status: rawResult } : rawResult;
 

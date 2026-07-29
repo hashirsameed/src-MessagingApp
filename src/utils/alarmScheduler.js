@@ -192,11 +192,17 @@ export const computeTargetAlarmTimestamp = (contact, template) => {
   );
 };
 
+// Buffer (500ms) to prevent sub-millisecond precision issues when contact
+// creation and alarm target are at the same moment, e.g. a contact added at
+// 7:38 AM with expiry at 7:38 AM today — without this, the strict `<` check
+// would return `true` due to a 1ms conversion difference and block scheduling.
+const ALARM_CREATED_TOLERANCE_MS = 500;
+
 export const wasAlarmTargetBeforeContactCreated = (contact, alarmMs) => {
   if (alarmMs === null || !contact?.created_at) return false;
   const createdAtMs = new Date(contact.created_at).getTime();
   if (isNaN(createdAtMs)) return false;
-  return alarmMs < createdAtMs;
+  return alarmMs < createdAtMs - ALARM_CREATED_TOLERANCE_MS;
 };
 
 export const computeAlarmTimestamp = (contact, template) => {

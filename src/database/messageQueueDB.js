@@ -222,6 +222,67 @@ export const getAllQueue = () => {
   }
 };
 
+// Cheap tab-badge counts — 3 COUNT(*) queries instead of loading every
+// row just to count them client-side.
+export const getQueueCounts = () => {
+  try {
+    const db = getDB();
+    const result = db.execute(
+      `SELECT status, COUNT(*) as count FROM message_queue GROUP BY status;`,
+    );
+    const rows = result.rows?._array || [];
+    const counts = { PENDING: 0, SENT: 0, FAILED: 0 };
+    rows.forEach((r) => { counts[r.status] = r.count; });
+    return counts;
+  } catch (error) {
+    handleError(error, 'getQueueCounts');
+    return { PENDING: 0, SENT: 0, FAILED: 0 };
+  }
+};
+
+// Per-status paginated page — PENDING sorted soonest-due-first (useful
+// order for "what fires next"), SENT/FAILED sorted most-recent-first.
+// This replaces the old "load the whole table, filter in JS" approach
+// so a queue of 500-1000 rows doesn't slow the UI down.
+export const getQueuePage = (status, limit = 30, offset = 0) => {
+  try {
+    const db = getDB();
+    const orderBy = status === 'PENDING'
+      ? 'scheduled_for ASC'
+      : 'COALESCE(sent_at, created_at) DESC';
+    const result = db.execute(
+      `SELECT * FROM message_queue WHERE status = ? ORDER BY ${orderBy} LIMIT ? OFFSET ?;`,
+      [status, limit, offset],
+    );
+    return result.rows?._array || [];
+  } catch (error) {
+    handleError(error, 'getQueuePage');
+    return [];
+  }
+};
+
+// Same as getQueuePage but scoped to a date range. PENDING filters on
+// scheduled_for (when it WILL send); SENT/FAILED filter on the moment it
+// actually resolved (sent_at, falling back to created_at for FAILED rows
+// that never got a sent_at). fromISO/toISO are UTC ISO strings.
+export const getQueueByDateRange = (status, fromISO, toISO, limit = 30, offset = 0) => {
+  try {
+    const db = getDB();
+    const dateCol = status === 'PENDING' ? 'scheduled_for' : 'COALESCE(sent_at, created_at)';
+    const orderBy = status === 'PENDING' ? `${dateCol} ASC` : `${dateCol} DESC`;
+    const result = db.execute(
+      `SELECT * FROM message_queue
+       WHERE status = ? AND datetime(${dateCol}) BETWEEN datetime(?) AND datetime(?)
+       ORDER BY ${orderBy} LIMIT ? OFFSET ?;`,
+      [status, fromISO, toISO, limit, offset],
+    );
+    return result.rows?._array || [];
+  } catch (error) {
+    handleError(error, 'getQueueByDateRange');
+    return [];
+  }
+};
+
 export const markAsSent = (id, traceId = null) => {
   debugTrace('MarkAsSentStart', { traceId, queueId: id });
   try {

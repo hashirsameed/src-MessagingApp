@@ -14,12 +14,25 @@ import { validateDate, validateTime } from '../utils/validators';
 import { ErrorMessages, handleError, showError, showConfirm, showSuccess } from '../utils/errorHandler';
 import { runExpiryCheck } from '../utils/schedulerEngine';
 import { scanDatabase } from '../utils/dbScan';
-import { getDevMode } from '../database/settingsDB';
+// FIX — asal export settingsDB.js mein `getDevMode` naam se kabhi tha hi
+// nahi. Dev-mode flag ka real module `../utils/devMode` hai, jiska export
+// `isDevModeOn()` hai (andar hi settingsDB ke getSetting/setSetting use
+// karta hai). Purana import (`getDevMode` from `../database/settingsDB`)
+// runtime pe `undefined` resolve hota tha — isi liye "undefined is not a
+// function" render error aa raha tha (line 363).
+import { isDevModeOn } from '../utils/devMode';
 
 export default function ContactListScreen({ navigation }) {
   const insets = useSafeAreaInsets();
   const [contacts, setContacts] = useState([]);
   const [templates, setTemplates] = useState([]);
+
+  // devMode state mein cached hai (SettingsScreen.js wale pattern jaisa) —
+  // isDevModeOn() ko seedha JSX/renderItem ke andar baar-baar call karne se
+  // bachne ke liye. Ek hi read loadContacts() ke andar hoti hai (jo
+  // useFocusEffect se har focus par chalta hai), baaki jagah state se hi
+  // read hota hai.
+  const [devMode, setDevMode] = useState(false);
 
   // Test panel (dev mode only) — which contact's panel is open, the
   // scheduled_alarms rows for it (read-only "already set" display), and
@@ -36,6 +49,7 @@ export default function ContactListScreen({ navigation }) {
       const data = getAllContacts();
       setContacts(data);
       setTemplates(getAllTemplates());
+      setDevMode(isDevModeOn()); // single read per focus, cached in state
     } catch (error) {
       handleError(error, 'ContactListScreen.loadContacts');
       showError('Error', ErrorMessages.DB_READ);
@@ -227,7 +241,7 @@ export default function ContactListScreen({ navigation }) {
           <TouchableOpacity style={styles.btnSend} onPress={() => handleSend(item)}>
             <Text style={styles.btnSendText}>Send</Text>
           </TouchableOpacity>
-          {getDevMode() && (
+          {devMode && (
             <TouchableOpacity style={styles.btnTest} onPress={() => toggleTestPanel(item)}>
               <Text style={styles.btnTestText}>{testOpenId === item.id ? 'Close' : 'Test'}</Text>
             </TouchableOpacity>
@@ -237,7 +251,7 @@ export default function ContactListScreen({ navigation }) {
           </TouchableOpacity>
         </View>
 
-        {getDevMode() && testOpenId === item.id && (
+        {devMode && testOpenId === item.id && (
           <View style={styles.testPanel}>
             <Text style={styles.testPanelTitle}>Scheduled alarms (already set)</Text>
             {testAlarms.length === 0 ? (
@@ -310,8 +324,8 @@ export default function ContactListScreen({ navigation }) {
           <Text style={styles.headerTitle}>Contacts</Text>
           <Text style={styles.headerSubtitle}>{contacts.length} contact{contacts.length !== 1 ? 's' : ''}</Text>
         </View>
-        {/* Dev/Testing only — hidden in production builds */}
-        {getDevMode() && (
+        {/* Dev/Testing only — hidden unless Developer Mode is ON */}
+        {devMode && (
           <TouchableOpacity style={styles.checkBtn} onPress={handleCheckExpiring}>
             <Text style={styles.checkBtnText}>Check Expiring</Text>
           </TouchableOpacity>

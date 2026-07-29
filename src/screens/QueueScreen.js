@@ -4,6 +4,7 @@ import {
   Text,
   FlatList,
   TouchableOpacity,
+  TextInput,
   StyleSheet,
   Alert,
   ActivityIndicator,
@@ -15,7 +16,9 @@ import {
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import {
-  getAllQueue,
+  getQueuePage,
+  getQueueByDateRange,
+  getQueueCounts,
   removeFromQueue,
   revertToPending,
 } from '../database/messageQueueDB';
@@ -23,6 +26,7 @@ import { getAllContacts } from '../database/contactDB';
 import { getAllTemplates } from '../database/templateDB';
 import { processQueue } from '../utils/queueProcessor';
 import { formatDateTime12Hour } from '../utils/dateFormat';
+import { validateDate } from '../utils/validators';
 
 const TABS = ['PENDING', 'SENT', 'FAILED'];
 const SCREEN_WIDTH = Dimensions.get('window').width;
@@ -46,17 +50,63 @@ const shouldShowDelete = (item) =>
   (Platform.OS === 'android' && item.platform_id === 'sms');
 
 export default function QueueScreen() {
+  const PAGE_SIZE = 30;
   const [activeTab, setActiveTab]       = useState('PENDING');
-  const [allItems, setAllItems]         = useState([]);
+  const [itemsByTab, setItemsByTab]     = useState({ PENDING: [], SENT: [], FAILED: [] });
+  const [pageByTab, setPageByTab]       = useState({ PENDING: 0, SENT: 0, FAILED: 0 });
+  const [hasMoreByTab, setHasMoreByTab] = useState({ PENDING: true, SENT: true, FAILED: true });
+  const [loadingMore, setLoadingMore]   = useState(false);
+  const [counts, setCounts]             = useState({ PENDING: 0, SENT: 0, FAILED: 0 });
   const [contactMap, setContactMap]     = useState({});
   const [templateMap, setTemplateMap]   = useState({});
   const [refreshing, setRefreshing]     = useState(false);
   const [processing, setProcessing]     = useState(false);
+  // Date-range filter — both null means "no filter, show most-recent page"
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo]     = useState('');
+  const [dateError, setDateError] = useState('');
   const scrollX  = useRef(new Animated.Value(0)).current;
   const pagerRef = useRef(null);
 
+  const isRangeActive = () => {
+    const fromOk = validateDate(dateFrom).valid;
+    const toOk = validateDate(dateTo).valid;
+    return fromOk && toOk;
+  };
+
+  // Fetches page 0 for one tab (or all three when tab is omitted) and
+  // resets its pagination — used on focus, tab switch, filter change,
+  // and the 5s live-refresh tick (only refreshes the currently active tab).
+  const loadTabPage = useCallback((tab) => {
+    const rangeActive = isRangeActive();
+    const data = rangeActive
+      ? getQueueByDateRange(tab, `${dateFrom}T00:00:00Z`, `${dateTo}T23:59:59Z`, PAGE_SIZE, 0)
+      : getQueuePage(tab, PAGE_SIZE, 0);
+    setItemsByTab((prev) => ({ ...prev, [tab]: data }));
+    setPageByTab((prev) => ({ ...prev, [tab]: 0 }));
+    setHasMoreByTab((prev) => ({ ...prev, [tab]: data.length === PAGE_SIZE }));
+  }, [dateFrom, dateTo]);
+
+  const loadMoreForTab = (tab) => {
+    if (loadingMore || !hasMoreByTab[tab]) return;
+    setLoadingMore(true);
+    try {
+      const nextPage = pageByTab[tab] + 1;
+      const rangeActive = isRangeActive();
+      const data = rangeActive
+        ? getQueueByDateRange(tab, `${dateFrom}T00:00:00Z`, `${dateTo}T23:59:59Z`, PAGE_SIZE, nextPage * PAGE_SIZE)
+        : getQueuePage(tab, PAGE_SIZE, nextPage * PAGE_SIZE);
+      if (data.length > 0) {
+        setItemsByTab((prev) => ({ ...prev, [tab]: [...prev[tab], ...data] }));
+        setPageByTab((prev) => ({ ...prev, [tab]: nextPage }));
+      }
+      setHasMoreByTab((prev) => ({ ...prev, [tab]: data.length === PAGE_SIZE }));
+    } finally {
+      setLoadingMore(false);
+    }
+  };
+
   const loadData = useCallback(() => {
-    const items     = getAllQueue();
     const contacts  = getAllContacts();
     const templates = getAllTemplates();
 
@@ -65,10 +115,33 @@ export default function QueueScreen() {
     const tMap = {};
     templates.forEach((t) => { tMap[t.id] = t; });
 
-    setAllItems(items);
     setContactMap(cMap);
     setTemplateMap(tMap);
-  }, []);
+    setCounts(getQueueCounts());
+    loadTabPage(activeTab);
+  }, [activeTab, loadTabPage]);
+
+  const applyDateFilter = () => {
+    if (!dateFrom.trim() && !dateTo.trim()) {
+      setDateError('');
+      loadTabPage(activeTab);
+      return;
+    }
+    const fromCheck = validateDate(dateFrom);
+    const toCheck = validateDate(dateTo);
+    if (!fromCheck.valid) { setDateError(`From: ${fromCheck.message}`); return; }
+    if (!toCheck.valid) { setDateError(`To: ${toCheck.message}`); return; }
+    if (dateFrom > dateTo) { setDateError('From date must be before To date.'); return; }
+    setDateError('');
+    loadTabPage(activeTab);
+  };
+
+  const clearDateFilter = () => {
+    setDateFrom('');
+    setDateTo('');
+    setDateError('');
+    loadTabPage(activeTab);
+  };
 
   // Live-refresh while screen is focused — messages get sent by a background
   // native alarm, not by any UI action, so focus-only reload wasn't enough.
@@ -86,10 +159,7 @@ export default function QueueScreen() {
     setTimeout(() => setRefreshing(false), 500);
   }, [loadData]);
 
-  const pendingCount  = allItems.filter((i) => i.status === 'PENDING').length;
-  const sentCount     = allItems.filter((i) => i.status === 'SENT').length;
-  const failedCount   = allItems.filter((i) => i.status === 'FAILED').length;
-  const tabCount      = { PENDING: pendingCount, SENT: sentCount, FAILED: failedCount };
+  const tabCount = counts;
 
   const goToTab = (index) => {
     setActiveTab(TABS[index]);
@@ -294,6 +364,33 @@ export default function QueueScreen() {
         })}
       </View>
 
+      {/* Date range filter */}
+      <View style={styles.filterBar}>
+        <TextInput
+          style={styles.filterInput}
+          placeholder="From (YYYY-MM-DD)"
+          placeholderTextColor="#9CA3AF"
+          value={dateFrom}
+          onChangeText={setDateFrom}
+        />
+        <TextInput
+          style={styles.filterInput}
+          placeholder="To (YYYY-MM-DD)"
+          placeholderTextColor="#9CA3AF"
+          value={dateTo}
+          onChangeText={setDateTo}
+        />
+        <TouchableOpacity style={styles.filterApplyBtn} onPress={applyDateFilter}>
+          <Text style={styles.filterApplyBtnText}>Filter</Text>
+        </TouchableOpacity>
+        {(dateFrom.length > 0 || dateTo.length > 0) && (
+          <TouchableOpacity style={styles.filterClearBtn} onPress={clearDateFilter}>
+            <Text style={styles.filterClearBtnText}>✕</Text>
+          </TouchableOpacity>
+        )}
+      </View>
+      {dateError ? <Text style={styles.filterError}>{dateError}</Text> : null}
+
       {/* Pages */}
       <Animated.ScrollView
         ref={pagerRef}
@@ -308,7 +405,7 @@ export default function QueueScreen() {
         onMomentumScrollEnd={handleMomentumEnd}
         style={styles.pager}>
         {TABS.map((tab) => {
-          const items = allItems.filter((i) => i.status === tab);
+          const items = itemsByTab[tab];
           return (
             <View key={tab} style={styles.page}>
               <FlatList
@@ -318,6 +415,13 @@ export default function QueueScreen() {
                 ListEmptyComponent={renderEmpty(tab)}
                 contentContainerStyle={
                   items.length === 0 ? styles.emptyFlex : styles.listContent
+                }
+                onEndReached={() => loadMoreForTab(tab)}
+                onEndReachedThreshold={0.4}
+                ListFooterComponent={
+                  loadingMore && tab === activeTab ? (
+                    <Text style={{ textAlign: 'center', color: '#9CA3AF', paddingVertical: 12 }}>Loading more...</Text>
+                  ) : null
                 }
                 refreshControl={
                   <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#1A1A2E" />
@@ -352,6 +456,14 @@ const styles = StyleSheet.create({
   tabLabel:     { fontSize: 12, fontWeight: '600', color: '#BDBDBD' },
   tabBadge:     { borderRadius: 9, minWidth: 17, height: 17, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 5 },
   tabBadgeText: { fontSize: 10, fontWeight: '700', color: '#fff' },
+
+  filterBar:      { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 12, paddingVertical: 8, backgroundColor: '#fff', borderBottomWidth: 1, borderBottomColor: '#F0F0F0' },
+  filterInput:    { flex: 1, fontSize: 12, color: '#1A1A2E', backgroundColor: '#F8F9FC', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 7, borderWidth: 1, borderColor: '#EEE' },
+  filterApplyBtn: { backgroundColor: '#1A1A2E', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 8 },
+  filterApplyBtnText: { color: '#fff', fontSize: 12, fontWeight: '700' },
+  filterClearBtn: { paddingHorizontal: 6, paddingVertical: 8 },
+  filterClearBtnText: { color: '#9CA3AF', fontSize: 14, fontWeight: '700' },
+  filterError:    { color: '#EF4444', fontSize: 11, paddingHorizontal: 14, paddingTop: 6, backgroundColor: '#fff' },
 
   pager: { flex: 1 },
   page:  { width: SCREEN_WIDTH, flex: 1 },

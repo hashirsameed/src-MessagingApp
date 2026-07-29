@@ -4,7 +4,7 @@ import {
   StatusBar, ScrollView, Alert, ActivityIndicator, NativeModules, Platform, Switch, PermissionsAndroid,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
-import { getDefaultPlatform, setDefaultPlatform, getDevMode, setDevMode } from '../database/settingsDB';
+import { getDefaultPlatform, setDefaultPlatform } from '../database/settingsDB';
 import { getAllPlatforms, togglePlatformEnabled, seedDefaultPlatforms } from '../database/platformDB';
 import { getAllRateLimits, setRateLimit, clearRateLimit } from '../database/rateLimitDB';
 import { handleError, showError, showSuccess, ErrorMessages } from '../utils/errorHandler';
@@ -13,6 +13,15 @@ import { hasWhatsAppCredentials } from '../utils/whatsappService';
 import { requestSmsPermission } from '../platforms/localTextAdapter';
 import { canScheduleExactAlarms, cancelAlarmsForPlatform, rescheduleAlarmsForPlatform } from '../utils/alarmScheduler';
 import ModernToggle from '../components/ModernToggle';
+// FIX — settingsDB.js mein `getDevMode`/`setDevMode` naam se koi export
+// kabhi tha hi nahi. Asal dev-mode flag `../utils/devMode` mein hai, jiske
+// exports `isDevModeOn()` / `setDevModeOn()` hain (andar hi settingsDB ke
+// generic getSetting/setSetting use karte hain). Purana import runtime pe
+// `undefined` resolve hota tha — ContactListScreen.js mein isi wajah se
+// "undefined is not a function" render error aa raha tha; SettingsScreen.js
+// mein bhi wahi galat import tha, sirf abhi tak crash nahi hua tha kyunki
+// yahan call thoda alag jagah (handler ke andar) tha.
+import { isDevModeOn, setDevModeOn } from '../utils/devMode';
 
 const { AlarmModule } = NativeModules;
 
@@ -48,7 +57,7 @@ export default function SettingsScreen({ navigation }) {
       });
       setRateLimitDrafts(drafts);
       setPlatforms(getAllPlatforms());
-      setDevModeState(getDevMode());
+      setDevModeState(isDevModeOn());
       const configured = await hasWhatsAppCredentials();
       setWaConfigured(configured);
 
@@ -205,7 +214,7 @@ export default function SettingsScreen({ navigation }) {
   };
 
   const handleDevModeToggle = (value) => {
-    const ok = setDevMode(value);
+    const ok = setDevModeOn(value);
     if (ok) {
       setDevModeState(value);
       showSuccess(
@@ -476,7 +485,10 @@ export default function SettingsScreen({ navigation }) {
         </>
       )}
 
-      {/* ── Developer Mode toggle ── */}
+      {/* ── Developer Mode toggle — DB-backed runtime flag, works in release
+          builds too (unlike __DEV__ which is a compile-time constant). This
+          row itself is never hidden, otherwise there'd be no way to turn it
+          back on from a release build. ── */}
       <Text style={[styles.sectionLabel, { marginTop: 28 }]}>DEVELOPER</Text>
       <Text style={styles.sectionHint}>
         Toggle to show or hide developer tools (manual check, testing lab, debug traces).

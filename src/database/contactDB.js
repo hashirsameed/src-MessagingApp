@@ -26,6 +26,40 @@ export const getAllContacts = () => {
   }
 };
 
+// Paginated, no search term — used by ContactListScreen's default (empty
+// search box) list so it never loads the whole table at once.
+export const getContactsPage = (limit = 30, offset = 0) => {
+  try {
+    const db = getDB();
+    const result = db.execute(
+      'SELECT * FROM contacts ORDER BY name ASC LIMIT ? OFFSET ?;',
+      [limit, offset],
+    );
+    return result.rows?._array || [];
+  } catch (error) {
+    handleError(error, 'getContactsPage');
+    return [];
+  }
+};
+
+// Paginated name/phone search — same page shape as getContactsPage so the
+// screen can swap between the two without changing its pagination logic.
+export const searchContacts = (query, limit = 30, offset = 0) => {
+  try {
+    const db = getDB();
+    const like = `%${query}%`;
+    const result = db.execute(
+      `SELECT * FROM contacts WHERE name LIKE ? OR phone_number LIKE ?
+       ORDER BY name ASC LIMIT ? OFFSET ?;`,
+      [like, like, limit, offset],
+    );
+    return result.rows?._array || [];
+  } catch (error) {
+    handleError(error, 'searchContacts');
+    return [];
+  }
+};
+
 export const insertContact = (contact) => {
   try {
     const db = getDB();

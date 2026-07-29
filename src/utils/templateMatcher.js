@@ -15,7 +15,13 @@ export const getDaysUntilExpiry = (expiryDatetime) => {
   const expiryPktMs = pakistanPartsToUtcMs(expiryParts.year, expiryParts.month, expiryParts.day);
 
   const diff = expiryPktMs - todayPktMs;
-  return Math.round(diff / (1000 * 60 * 60 * 24));
+  const daysDiff = Math.round(diff / (1000 * 60 * 60 * 24));
+
+  // Same Pakistan-calendar date but time has already passed → show "Expired"
+  // instead of "Today". This catches e.g. expiry at 7:35 AM when it's 7:38 AM now.
+  if (daysDiff === 0 && expiry < now) return -1;
+
+  return daysDiff;
 };
 
 /**

@@ -46,6 +46,18 @@ import {
 } from './src/utils/alarmScheduler';
 import { getActiveTemplates } from './src/database/templateDB';
 import { setContactListener } from './src/utils/contactEvents';
+// FIX — loadDevModeCache() ko yahan (App.tsx) se call karna hai, db.js se
+// NAHI. Wajah: settingsDB.js khud getDB() ko db.js se import karta hai, aur
+// devMode.js settingsDB.js ko import karta hai. Agar db.js devMode.js ko
+// import kare (loadDevModeCache chalane ke liye), to cycle ban jata hai:
+//   db.js -> devMode.js -> settingsDB.js -> db.js
+// App.tsx is cycle se bahar hai (koi bhi in teeno ke opposite direction
+// mein ise import nahi karta), isliye yahan se call karna safe hai. Ye
+// sirf ek OPTIONAL warm-up hai — isDevModeOn() khud bhi lazy-load karta
+// hai agar cache abhi tak load na hui ho (dekho devMode.js), to iske bina
+// bhi app crash ya galat value nahi degi, sirf pehla isDevModeOn() call
+// thoda extra (ek DB read) kaam karega.
+import { loadDevModeCache } from './src/utils/devMode';
 
 const Stack = createNativeStackNavigator();
 const Tab = createMaterialTopTabNavigator();
@@ -197,6 +209,13 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    // FIX — dev-mode cache ko sabse pehle warm karo, kisi bhi screen ke
+    // mount/render se pehle. registerBackgroundScheduler() aur
+    // triggerExpiryCheck() dono internally debugTrace() jaisi hot-path
+    // logging chala sakte hain jo isDevModeOn() check karti hai — is liye
+    // yeh sabse upar, in dono se PEHLE call hona chahiye.
+    loadDevModeCache();
+
     registerBackgroundScheduler();
 
     // Run once at startup
