@@ -2,27 +2,18 @@ import { getExpiringContacts } from '../database/contactDB';
 import { getActiveTemplates } from '../database/templateDB';
 import { findMatchingTemplates, personalizeMessage } from './templateMatcher';
 import { isTemplateAlarmDue, computeTargetAlarmTimestamp } from './alarmScheduler';
-import { toPakistanParts, pakistanPartsToUtcMs } from './pakistanTime';
+import { getDaysUntilExpiry } from './templateMatcher';
 
 // Same bounds as schedulerEngine.runExpiryCheck.
 const FAR_PAST_YEARS = 20;
 const FAR_FUTURE_YEARS = 2;
 const MAX_TEMPLATE_GRACE_PERIOD_MS = 60 * 60 * 1000; // 1 hour
 
-// templateMatcher's getDaysUntilExpiry always anchors to the real
-// `new Date()` — fine for production, useless for a time-travel simulator.
-// This is the same Pakistan-calendar math, anchored to whatever "now" the
-// Dev Testing Lab is simulating instead.
-const getDaysUntilExpiryAt = (expiryDatetime, atMs) => {
-  const nowParts = toPakistanParts(new Date(atMs));
-  const todayPktMs = pakistanPartsToUtcMs(nowParts.year, nowParts.month, nowParts.day);
-
-  const expiry = new Date(expiryDatetime);
-  const expiryParts = toPakistanParts(expiry);
-  const expiryPktMs = pakistanPartsToUtcMs(expiryParts.year, expiryParts.month, expiryParts.day);
-
-  return Math.round((expiryPktMs - todayPktMs) / (1000 * 60 * 60 * 24));
-};
+// templateMatcher's getDaysUntilExpiry now accepts an optional `nowMs` so
+// this simulator just anchors to whatever "now" the Dev Testing Lab is
+// time-traveling to, instead of duplicating the Pakistan-calendar +
+// ±60s present-window math here (was two copies drifting apart before).
+const getDaysUntilExpiryAt = (expiryDatetime, atMs) => getDaysUntilExpiry(expiryDatetime, atMs);
 
 /**
  * Read-only dry-run mirror of schedulerEngine.runExpiryCheck — identical

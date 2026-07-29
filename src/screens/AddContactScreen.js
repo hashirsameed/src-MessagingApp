@@ -86,6 +86,17 @@ export default function AddContactScreen({ navigation, route }) {
   };
 
   return (
+    // FIX — Save Contact button keyboard-shift bug
+    // Masla: AndroidManifest.xml pehle `adjustResize` tha — keyboard khulte
+    //         hi window resize hoti, aur is ScrollView ke andar wale Save/
+    //         Cancel buttons upar shift ho jate (screen ka available height
+    //         hi kam ho jata tha).
+    // Fix:   Manifest ab `adjustPan` use karta hai (poore app ke liye) —
+    //         window resize nahi hoti, Android khud sirf focused input ko
+    //         keyboard ke upar pan karta hai. Isliye Android par
+    //         KeyboardAvoidingView ka `behavior` ab bhi `undefined` (no-op)
+    //         hai — ye sirf iOS ke liye 'padding' laga raha hai, jahan
+    //         adjustPan/adjustResize ka concept hi nahi hota.
     <KeyboardAvoidingView
       style={{ flex: 1 }}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}>

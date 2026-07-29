@@ -418,6 +418,7 @@ export default function QueueScreen() {
                 }
                 onEndReached={() => loadMoreForTab(tab)}
                 onEndReachedThreshold={0.4}
+                keyboardShouldPersistTaps="handled"
                 ListFooterComponent={
                   loadingMore && tab === activeTab ? (
                     <Text style={{ textAlign: 'center', color: '#9CA3AF', paddingVertical: 12 }}>Loading more...</Text>

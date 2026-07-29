@@ -1,12 +1,13 @@
 import { toPakistanParts, pakistanPartsToUtcMs, formatPakistanDate } from './pakistanTime';
+import { classifyTiming } from './expiryTiming';
 
 /**
  * Days remaining until expiry, counted on the Pakistan calendar (not UTC,
  * not the device's local calendar) — so "3 days before expiry" always
  * means 3 Pakistan-calendar days, regardless of where the phone is set.
  */
-export const getDaysUntilExpiry = (expiryDatetime) => {
-  const now = new Date();
+export const getDaysUntilExpiry = (expiryDatetime, nowMs = Date.now()) => {
+  const now = new Date(nowMs);
   const nowParts = toPakistanParts(now);
   const todayPktMs = pakistanPartsToUtcMs(nowParts.year, nowParts.month, nowParts.day);
 
@@ -17,9 +18,26 @@ export const getDaysUntilExpiry = (expiryDatetime) => {
   const diff = expiryPktMs - todayPktMs;
   const daysDiff = Math.round(diff / (1000 * 60 * 60 * 24));
 
-  // Same Pakistan-calendar date but time has already passed → show "Expired"
-  // instead of "Today". This catches e.g. expiry at 7:35 AM when it's 7:38 AM now.
-  if (daysDiff === 0 && expiry < now) return -1;
+  // ─────────────────────────────────────────────────────────────────────
+  // CRITICAL FIX — present-time edge case (±60s buffer)
+  // Masla: purana check `expiry < now` STRICT tha — agar contact ka
+  //         expiry aur "abhi" (now) ka waqt EXACT same minute/second ho
+  //         (e.g. contact 7:38:00 PM par add hua aur expiry bhi 7:38 PM
+  //         hai), to `new Date(expiryDatetime)` aur `new Date()` ke beech
+  //         chand milliseconds ka natural gap hamesha expiry < now true
+  //         kar deta — result: contact turant "Expired" (-1) dikhta aur
+  //         days_before=0 ("on expiry") wala template kabhi match hi
+  //         nahi karta, message skip ho jata.
+  // Fix:   classifyTiming() se ±60s ka present-window use karo. Sirf tab
+  //         "Expired" (-1) do jab expiry us window se BAHAR (>60s) guzar
+  //         chuka ho. Isi window ke andar "abhi" (present) treat hota hai
+  //         → daysDiff untouched (0), template match hoga, message turant
+  //         is cycle mein consider hoga — skip nahi hoga.
+  // ─────────────────────────────────────────────────────────────────────
+  if (daysDiff === 0) {
+    const timing = classifyTiming(expiry.getTime(), nowMs);
+    if (timing === 'PAST') return -1;
+  }
 
   return daysDiff;
 };

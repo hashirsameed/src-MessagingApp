@@ -417,6 +417,7 @@ export default function ContactListScreen({ navigation }) {
         contentContainerStyle={{ padding: 16, paddingBottom: 100 }}
         onEndReached={loadMoreContacts}
         onEndReachedThreshold={0.4}
+        keyboardShouldPersistTaps="handled"
         ListFooterComponent={
           loadingMore ? (
             <ActivityIndicator style={{ marginVertical: 12 }} color="#1A1A2E" />
