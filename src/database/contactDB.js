@@ -42,21 +42,45 @@ export const getContactsPage = (limit = 30, offset = 0) => {
   }
 };
 
-// Paginated name/phone search — same page shape as getContactsPage so the
+// Paginated name search — same page shape as getContactsPage so the
 // screen can swap between the two without changing its pagination logic.
 export const searchContacts = (query, limit = 30, offset = 0) => {
   try {
     const db = getDB();
     const like = `%${query}%`;
     const result = db.execute(
-      `SELECT * FROM contacts WHERE name LIKE ? OR phone_number LIKE ?
+      `SELECT * FROM contacts WHERE name LIKE ?
        ORDER BY name ASC LIMIT ? OFFSET ?;`,
-      [like, like, limit, offset],
+      [like, limit, offset],
     );
     return result.rows?._array || [];
   } catch (error) {
     handleError(error, 'searchContacts');
     return [];
+  }
+};
+
+// Cheap total count for the "X contacts" header — a COUNT(*) instead of
+// loading every row just to read its length. Same name-only LIKE filter
+// as searchContacts() so the header total always matches what's on
+// screen, whether that's the full list or a search result.
+export const getContactsCount = (query = '') => {
+  try {
+    const db = getDB();
+    const trimmed = (query ?? '').trim();
+    if (trimmed) {
+      const like = `%${trimmed}%`;
+      const result = db.execute(
+        'SELECT COUNT(*) as count FROM contacts WHERE name LIKE ?;',
+        [like],
+      );
+      return result.rows?._array?.[0]?.count || 0;
+    }
+    const result = db.execute('SELECT COUNT(*) as count FROM contacts;');
+    return result.rows?._array?.[0]?.count || 0;
+  } catch (error) {
+    handleError(error, 'getContactsCount');
+    return 0;
   }
 };
 

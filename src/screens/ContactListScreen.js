@@ -1,11 +1,13 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
   View, Text, FlatList, TouchableOpacity, TextInput,
-  StyleSheet, StatusBar, Alert,
+  StyleSheet, StatusBar, Alert, ActivityIndicator,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { getAllContacts, deleteContact, updateContact } from '../database/contactDB';
+import {
+  getContactsPage, searchContacts, getContactsCount, deleteContact, updateContact,
+} from '../database/contactDB';
 import { getAllTemplates } from '../database/templateDB';
 import { getScheduledAlarmsByContact } from '../database/scheduledAlarmDB';
 import { getDaysUntilExpiry, findMatchingTemplate } from '../utils/templateMatcher';
@@ -22,10 +24,27 @@ import { scanDatabase } from '../utils/dbScan';
 // function" render error aa raha tha (line 363).
 import { isDevModeOn } from '../utils/devMode';
 
+const PAGE_SIZE = 30;
+// Debounce the search box so every keystroke doesn't fire its own SQL
+// query — only the settled value (300ms after typing stops) reloads the
+// list. searchContacts()/getContactsPage() share the same LIMIT/OFFSET
+// page shape, so swapping between "searching" and "plain list" here is
+// just a matter of which one gets called.
+const SEARCH_DEBOUNCE_MS = 300;
+
 export default function ContactListScreen({ navigation }) {
   const insets = useSafeAreaInsets();
   const [contacts, setContacts] = useState([]);
   const [templates, setTemplates] = useState([]);
+  const [totalCount, setTotalCount] = useState(0);
+
+  // Search + lazy-loading pagination — same pattern QueueScreen.js already
+  // uses for its date-range filter, applied here to name search.
+  const [searchQuery, setSearchQuery] = useState('');
+  const [page, setPage] = useState(0);
+  const [hasMore, setHasMore] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const searchDebounceRef = useRef(null);
 
   // devMode state mein cached hai (SettingsScreen.js wale pattern jaisa) —
   // isDevModeOn() ko seedha JSX/renderItem ke andar baar-baar call karne se
@@ -44,17 +63,61 @@ export default function ContactListScreen({ navigation }) {
   const [testMeridiem, setTestMeridiem] = useState('AM');
   const [testErrors, setTestErrors] = useState({});
 
-  const loadContacts = () => {
+  // Loads page 0 for whatever query is currently active (empty = plain
+  // list). Called on focus, after add/delete/update, and (debounced) on
+  // every search-box change. Resets pagination each time, since a new
+  // query means a new result set from the top.
+  const loadContacts = useCallback((query = searchQuery) => {
     try {
-      const data = getAllContacts();
+      const trimmed = query.trim();
+      const data = trimmed
+        ? searchContacts(trimmed, PAGE_SIZE, 0)
+        : getContactsPage(PAGE_SIZE, 0);
       setContacts(data);
+      setPage(0);
+      setHasMore(data.length === PAGE_SIZE);
+      setTotalCount(getContactsCount(trimmed));
       setTemplates(getAllTemplates());
       setDevMode(isDevModeOn()); // single read per focus, cached in state
     } catch (error) {
       handleError(error, 'ContactListScreen.loadContacts');
       showError('Error', ErrorMessages.DB_READ);
     }
+  }, [searchQuery]);
+
+  // Lazy-load the next page — this is the fix for a 500-1000 row contact
+  // table loading all at once; it now only ever pulls PAGE_SIZE rows at a
+  // time, same LIMIT/OFFSET shape whether searching or browsing the full list.
+  const loadMoreContacts = () => {
+    if (loadingMore || !hasMore) return;
+    setLoadingMore(true);
+    try {
+      const trimmed = searchQuery.trim();
+      const nextPage = page + 1;
+      const data = trimmed
+        ? searchContacts(trimmed, PAGE_SIZE, nextPage * PAGE_SIZE)
+        : getContactsPage(PAGE_SIZE, nextPage * PAGE_SIZE);
+      if (data.length > 0) {
+        setContacts((prev) => [...prev, ...data]);
+        setPage(nextPage);
+      }
+      setHasMore(data.length === PAGE_SIZE);
+    } finally {
+      setLoadingMore(false);
+    }
   };
+
+  const onSearchChange = (text) => {
+    setSearchQuery(text);
+    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    searchDebounceRef.current = setTimeout(() => loadContacts(text), SEARCH_DEBOUNCE_MS);
+  };
+
+  // Clear any pending debounce timer on unmount so it doesn't fire a
+  // setState against an unmounted screen.
+  useEffect(() => () => {
+    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+  }, []);
 
   const refreshTestAlarms = (contactId) => {
     try {
@@ -137,7 +200,7 @@ export default function ContactListScreen({ navigation }) {
   useFocusEffect(
     useCallback(() => {
       loadContacts();
-    }, [])
+    }, [loadContacts])
   );
 
   const handleSend = (contact) => {
@@ -322,7 +385,7 @@ export default function ContactListScreen({ navigation }) {
       <View style={styles.header}>
         <View style={{ flex: 1 }}>
           <Text style={styles.headerTitle}>Contacts</Text>
-          <Text style={styles.headerSubtitle}>{contacts.length} contact{contacts.length !== 1 ? 's' : ''}</Text>
+          <Text style={styles.headerSubtitle}>{totalCount} contact{totalCount !== 1 ? 's' : ''}</Text>
         </View>
         {/* Dev/Testing only — hidden unless Developer Mode is ON */}
         {devMode && (
@@ -331,16 +394,45 @@ export default function ContactListScreen({ navigation }) {
           </TouchableOpacity>
         )}
       </View>
+
+      <View style={styles.searchBar}>
+        <TextInput
+          style={styles.searchInput}
+          placeholder="Search by name..."
+          placeholderTextColor="#9CA3AF"
+          value={searchQuery}
+          onChangeText={onSearchChange}
+        />
+        {searchQuery.length > 0 && (
+          <TouchableOpacity style={styles.searchClearBtn} onPress={() => onSearchChange('')}>
+            <Text style={styles.searchClearText}>✕</Text>
+          </TouchableOpacity>
+        )}
+      </View>
+
       <FlatList
         data={contacts}
         keyExtractor={item => item.id}
         renderItem={renderItem}
         contentContainerStyle={{ padding: 16, paddingBottom: 100 }}
+        onEndReached={loadMoreContacts}
+        onEndReachedThreshold={0.4}
+        ListFooterComponent={
+          loadingMore ? (
+            <ActivityIndicator style={{ marginVertical: 12 }} color="#1A1A2E" />
+          ) : null
+        }
         ListEmptyComponent={
           <View style={styles.emptyContainer}>
             <Text style={styles.emptyIcon}>👥</Text>
-            <Text style={styles.emptyTitle}>No Contacts Yet</Text>
-            <Text style={styles.emptySubtitle}>Add your first contact to get started</Text>
+            <Text style={styles.emptyTitle}>
+              {searchQuery.trim() ? 'No Matches' : 'No Contacts Yet'}
+            </Text>
+            <Text style={styles.emptySubtitle}>
+              {searchQuery.trim()
+                ? `Nothing matches "${searchQuery.trim()}"`
+                : 'Add your first contact to get started'}
+            </Text>
           </View>
         }
       />
@@ -374,6 +466,18 @@ const styles = StyleSheet.create({
   checkBtnText: { color: '#fff', fontWeight: '600', fontSize: 13 },
   headerTitle: { fontSize: 28, fontWeight: '700', color: '#1A1A2E' },
   headerSubtitle: { fontSize: 14, color: '#888', marginTop: 2 },
+  searchBar: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    backgroundColor: '#fff', paddingHorizontal: 16, paddingVertical: 10,
+    borderBottomWidth: 1, borderBottomColor: '#F0F0F0',
+  },
+  searchInput: {
+    flex: 1, fontSize: 14, color: '#1A1A2E', backgroundColor: '#F8F9FC',
+    borderRadius: 10, paddingHorizontal: 12, paddingVertical: 9,
+    borderWidth: 1, borderColor: '#EEEEEE',
+  },
+  searchClearBtn: { paddingHorizontal: 4, paddingVertical: 6 },
+  searchClearText: { color: '#9CA3AF', fontSize: 16, fontWeight: '700' },
   card: {
     backgroundColor: '#fff',
     borderRadius: 14,

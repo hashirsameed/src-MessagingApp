@@ -1,12 +1,17 @@
 import React, { useState, useEffect } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, Switch,
-  StyleSheet, KeyboardAvoidingView, Platform, ScrollView, StatusBar, Keyboard,
+  StyleSheet, KeyboardAvoidingView, Platform, ScrollView, StatusBar, Keyboard, Modal,
 } from 'react-native';
 import { insertTemplate } from '../database/templateDB';
 import { getAllContacts } from '../database/contactDB';
+import {
+  getAllPlatforms, getEnabledPlatforms, togglePlatformEnabled, seedDefaultPlatforms,
+} from '../database/platformDB';
 import { getCachedApprovedWhatsAppTemplates } from '../database/whatsappTemplateCacheDB';
-import { rescheduleAlarmsForTemplate } from '../utils/alarmScheduler';
+import {
+  rescheduleAlarmsForTemplate, rescheduleAlarmsForPlatform, cancelAlarmsForPlatform,
+} from '../utils/alarmScheduler';
 import { handleError, showError, showSuccess, ErrorMessages } from '../utils/errorHandler';
 import { validateTemplateTitle, validateTemplateBody, validateOptionalTime } from '../utils/validators';
 import { parse12HourTimeTo24Hour, formatDaysLabel } from '../utils/dateFormat';
@@ -31,6 +36,47 @@ export default function CreateTemplateScreen({ navigation, route }) {
   const [metaTemplateLanguage, setMetaTemplateLanguage] = useState(null);
   const [approvedWaTemplates, setApprovedWaTemplates] = useState([]);
   const isWhatsApp = platformId === 'whatsapp';
+
+  // No enabled platform = nothing a template can actually send through.
+  // PlatformPicker still lists every platform regardless of is_enabled, so
+  // without this check the screen would silently let you build and save a
+  // template pointing at a platform that's currently off. platformsForModal
+  // holds every platform (enabled or not) so the modal can offer a toggle
+  // for each one; enabledPlatforms is just the count used to decide
+  // whether to block the screen.
+  const [enabledPlatforms, setEnabledPlatforms] = useState([]);
+  const [platformsForModal, setPlatformsForModal] = useState([]);
+  const [showEnablePlatformModal, setShowEnablePlatformModal] = useState(false);
+
+  const refreshPlatformGate = () => {
+    seedDefaultPlatforms(); // safe/idempotent — same call PlatformPicker itself makes
+    const enabled = getEnabledPlatforms();
+    setEnabledPlatforms(enabled);
+    setPlatformsForModal(getAllPlatforms());
+    setShowEnablePlatformModal(enabled.length === 0);
+  };
+
+  useEffect(() => {
+    refreshPlatformGate();
+  }, []);
+
+  // Toggling from inside the modal — same effect as SettingsScreen's
+  // platform switch (reschedule alarms on enable, cancel on disable) so
+  // enabling a platform here behaves identically to enabling it there.
+  const handleTogglePlatformInModal = async (platform, value) => {
+    try {
+      const ok = togglePlatformEnabled(platform.id, value);
+      if (!ok) { showError('Error', ErrorMessages.DB_WRITE); return; }
+      if (Platform.OS === 'android') {
+        if (value) await rescheduleAlarmsForPlatform(platform.id);
+        else await cancelAlarmsForPlatform(platform.id);
+      }
+      refreshPlatformGate();
+    } catch (error) {
+      handleError(error, 'CreateTemplateScreen.handleTogglePlatformInModal');
+      showError('Error', ErrorMessages.DB_WRITE);
+    }
+  };
 
   useEffect(() => {
     if (isWhatsApp) {
@@ -68,6 +114,16 @@ export default function CreateTemplateScreen({ navigation, route }) {
 
   const handleSave = async () => {
     if (!validate()) return;
+
+    // Defensive re-check — validate() doesn't cover this since it's not a
+    // form-field error, it's "there's nothing to send through at all".
+    // Re-reads fresh (not the possibly-stale enabledPlatforms state) so a
+    // platform disabled in another tab/screen moments ago is still caught.
+    if (getEnabledPlatforms().length === 0) {
+      refreshPlatformGate();
+      return;
+    }
+
     try {
       const normalizedSendTime = sendTime.trim()
         ? parse12HourTimeTo24Hour(sendTime, sendMeridiem)
@@ -151,7 +207,7 @@ export default function CreateTemplateScreen({ navigation, route }) {
 
           <View style={styles.divider} />
 
-          <PlatformPicker value={platformId} onChange={setPlatformId} />
+          <PlatformPicker value={platformId} onChange={setPlatformId} onPlatformsChanged={refreshPlatformGate} />
 
           <View style={styles.divider} />
 
@@ -316,6 +372,40 @@ export default function CreateTemplateScreen({ navigation, route }) {
         </TouchableOpacity>
 
       </ScrollView>
+
+      <Modal
+        visible={showEnablePlatformModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => navigation.goBack()}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalIcon}>⚠️</Text>
+            <Text style={styles.modalTitle}>Please enable a platform first</Text>
+            <Text style={styles.modalHint}>
+              Every platform is currently off, so a template has nothing to send through.
+              Turn on at least one below to continue.
+            </Text>
+
+            {platformsForModal.map((p) => (
+              <View key={p.id} style={styles.modalPlatformRow}>
+                <Text style={styles.modalPlatformIcon}>{p.icon}</Text>
+                <Text style={styles.modalPlatformName} numberOfLines={1}>{p.name}</Text>
+                <Switch
+                  value={p.is_enabled === 1}
+                  onValueChange={(v) => handleTogglePlatformInModal(p, v)}
+                  trackColor={{ false: '#E0E0E0', true: '#1A1A2E' }}
+                  thumbColor="#fff"
+                />
+              </View>
+            ))}
+
+            <TouchableOpacity style={styles.modalCancelBtn} onPress={() => navigation.goBack()}>
+              <Text style={styles.modalCancelBtnText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </KeyboardAvoidingView>
   );
 }
@@ -367,4 +457,27 @@ const styles = StyleSheet.create({
   waTemplateCheck: { fontSize: 14, fontWeight: '700', color: '#1A1A2E' },
   waTemplateMeta: { fontSize: 10, color: '#9E9E9E', marginTop: 2 },
   waTemplateBody: { fontSize: 12, color: '#4B5563', marginTop: 6, lineHeight: 16 },
+
+  modalOverlay: {
+    flex: 1, backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center', alignItems: 'center', padding: 24,
+  },
+  modalCard: {
+    width: '100%', maxWidth: 400, backgroundColor: '#fff',
+    borderRadius: 18, padding: 22, alignItems: 'center',
+  },
+  modalIcon: { fontSize: 32, marginBottom: 8 },
+  modalTitle: { fontSize: 17, fontWeight: '700', color: '#1A1A2E', textAlign: 'center' },
+  modalHint: {
+    fontSize: 12, color: '#9E9E9E', textAlign: 'center',
+    marginTop: 6, marginBottom: 16, lineHeight: 17,
+  },
+  modalPlatformRow: {
+    flexDirection: 'row', alignItems: 'center', width: '100%',
+    paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#F5F5F5',
+  },
+  modalPlatformIcon: { fontSize: 18, marginRight: 10 },
+  modalPlatformName: { flex: 1, fontSize: 14, fontWeight: '600', color: '#1A1A2E' },
+  modalCancelBtn: { marginTop: 16, paddingVertical: 8 },
+  modalCancelBtnText: { color: '#9E9E9E', fontSize: 14, fontWeight: '600' },
 });
