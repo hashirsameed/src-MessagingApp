@@ -2,6 +2,7 @@ import { getDB } from './db';
 import { handleError } from '../utils/errorHandler';
 import { debugTrace, debugTraceDbWrite, debugTraceError } from '../utils/debugTrace';
 import { logAction } from './auditLogDB';
+import { generateQueueId } from '../utils/idUtils';
 
 // Helper to find the latest alarm for a contact/template pair via queue_id JOIN
 const findLatestAlarm = (db, contactId, templateId) => db.execute(
@@ -70,8 +71,8 @@ export const upsertScheduledAlarm = (contactId, templateId, requestCode, trigger
         [requestCode],
       );
 
-      // 4. RESCHEDULE PHASE — random suffix avoids same-millisecond id collision
-      const queueId = `${contactId}_${templateId}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      // 4. RESCHEDULE PHASE
+      const queueId = generateQueueId(contactId, templateId);
       debugTraceDbWrite('UpsertScheduledAlarmWrite', { table: 'message_queue', pk: queueId, oldState: 'none', newState: 'PENDING', contactId, templateId });
 
       try {
@@ -147,7 +148,9 @@ export const getScheduledAlarmsByTemplate = (templateId) => {
 export const getAllActiveScheduledAlarms = () => {
   try {
     const result = getDB().execute(
-      `SELECT sa.id, sa.queue_id, sa.request_code, sa.trigger_at, sa.status, mq.contact_id, mq.template_id
+      `SELECT sa.id, sa.queue_id, sa.request_code, sa.trigger_at, sa.status,
+              mq.contact_id, mq.template_id,
+              CASE WHEN datetime(sa.trigger_at) <= datetime('now') THEN 1 ELSE 0 END AS is_overdue
        FROM scheduled_alarms sa JOIN message_queue mq ON mq.id = sa.queue_id
        WHERE sa.status = 'scheduled' ORDER BY sa.trigger_at ASC;`,
     );
@@ -158,6 +161,8 @@ export const getAllActiveScheduledAlarms = () => {
   }
 };
 
+// Maintained for backward compat; prefer is_overdue from
+// getAllActiveScheduledAlarms for single-query access.
 export const getDueScheduledAlarms = () => {
   try {
     const result = getDB().execute(

@@ -1,6 +1,6 @@
 import { handleError } from './errorHandler';
 import { debugTrace, debugTraceError } from './debugTrace';
-import { getAllActiveScheduledAlarms, getDueScheduledAlarms } from '../database/scheduledAlarmDB';
+import { getAllActiveScheduledAlarms } from '../database/scheduledAlarmDB';
 import { getPendingQueue } from '../database/messageQueueDB';
 
 /**
@@ -9,14 +9,9 @@ import { getPendingQueue } from '../database/messageQueueDB';
  *   - alarmHeadlessTask.js's ReconcilerTask (logs the snapshot only)
  *   - ContactListScreen.js's Test-panel "Scan" button (display only)
  *
- * This is deliberately just a thin composition over the already-correct,
- * already-shared queries in scheduledAlarmDB.js and messageQueueDB.js —
- * it does NOT define its own SQL/JOIN shape. That's intentional: those
- * two files are the source of truth for what "scheduled", "due", and
- * "pending" mean post-redesign (contact_id/template_id now live on
- * message_queue, scheduled_alarms only holds queue_id), so re-deriving
- * the same thing here with fresh SQL would risk drifting from them the
- * same way NextAlarmRepository.kt would if it didn't share a query too.
+ * Uses a SINGLE query (getAllActiveScheduledAlarms) with an is_overdue
+ * computed column, avoiding the redundant JOIN that previously happened
+ * when calling both getAllActiveScheduledAlarms AND getDueScheduledAlarms.
  *
  * Never writes anything — no claim, no status change, no alarm/SMS side
  * effect. Every consumer above treats this as a snapshot: SafetyNetTask
@@ -25,8 +20,8 @@ import { getPendingQueue } from '../database/messageQueueDB';
  */
 export const scanDatabase = () => {
   try {
-    const scheduled = getAllActiveScheduledAlarms(); // status = 'scheduled', includes overdue ones
-    const overdue = getDueScheduledAlarms();          // status = 'scheduled' AND trigger_at <= now
+    const scheduled = getAllActiveScheduledAlarms(); // includes is_overdue flag
+    const overdue = scheduled.filter((a) => a.is_overdue === 1);
     const pendingQueue = getPendingQueue();           // message_queue rows still PENDING
 
     const summary = {

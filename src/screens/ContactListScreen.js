@@ -11,7 +11,7 @@ import {
 import { getAllTemplates } from '../database/templateDB';
 import { getScheduledAlarmsByContact } from '../database/scheduledAlarmDB';
 import { getDaysUntilExpiry, findMatchingTemplate } from '../utils/templateMatcher';
-import { formatExpiryDate12Hour, formatDateTime12Hour, parse12HourTimeTo24Hour } from '../utils/dateFormat';
+import { formatDateTime12Hour, parse12HourTimeTo24Hour, toUTCISOString } from '../utils/dateFormat';
 import { validateDate, validateTime } from '../utils/validators';
 import { ErrorMessages, handleError, showError, showConfirm, showSuccess } from '../utils/errorHandler';
 import { runExpiryCheck } from '../utils/schedulerEngine';
@@ -161,7 +161,7 @@ export default function ContactListScreen({ navigation }) {
         setTestErrors({ date: 'Invalid date/time entered.' });
         return;
       }
-      const expiryUTC = localDateTime.toISOString().replace(/\.\d{3}Z$/, 'Z');
+      const expiryUTC = toUTCISOString(localDateTime);
 
       const ok = updateContact({
         id: contact.id,
@@ -294,7 +294,7 @@ export default function ContactListScreen({ navigation }) {
           <View style={styles.contactInfo}>
             <Text style={styles.contactName} numberOfLines={1}>{item.name}</Text>
             <Text style={styles.contactPhone} numberOfLines={1}>{item.phone_number}</Text>
-            <Text style={styles.contactExpiry} numberOfLines={1}>🗓 {formatExpiryDate12Hour(item.expiry_datetime)}</Text>
+            <Text style={styles.contactExpiry} numberOfLines={1}>🗓 {formatDateTime12Hour(item.expiry_datetime)}</Text>
           </View>
           <View style={[styles.badge, { backgroundColor: status.bg }]}>
             <Text style={[styles.badgeText, { color: status.color }]} numberOfLines={1}>{status.label}</Text>

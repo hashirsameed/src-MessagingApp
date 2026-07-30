@@ -6,7 +6,7 @@ import {
 import { insertContact } from '../database/contactDB';
 import { handleError, showError, showSuccess, ErrorMessages } from '../utils/errorHandler';
 import { validateName, validatePhoneNumber, validateDate, validateTime } from '../utils/validators';
-import { parse12HourTimeTo24Hour } from '../utils/dateFormat';
+import { parse12HourTimeTo24Hour, toUTCISOString } from '../utils/dateFormat';
 
 export default function AddContactScreen({ navigation, route }) {
   const [name, setName]             = useState('');
@@ -59,7 +59,7 @@ export default function AddContactScreen({ navigation, route }) {
         return;
       }
 
-      const expiryUTC = localDateTime.toISOString().replace(/\.\d{3}Z$/, 'Z');
+      const expiryUTC = toUTCISOString(localDateTime);
 
       const newContact = {
         id: `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,

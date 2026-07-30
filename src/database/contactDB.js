@@ -2,18 +2,7 @@ import { getDB } from './db';
 import { handleError } from '../utils/errorHandler';
 import { logAction } from './auditLogDB';
 import { emitContactEvent } from '../utils/contactEvents';
-
-// ---------------------------------------------------------------------------
-// Datetime helpers — all stored/queried values are UTC ISO strings,
-// e.g. "2026-07-15T09:30:00Z" (no milliseconds, always 'Z' suffix).
-// ---------------------------------------------------------------------------
-const toUTCISOString = (input) => {
-  const d = input instanceof Date ? input : new Date(input);
-  if (isNaN(d.getTime())) {
-    throw new Error(`Invalid datetime value: ${input}`);
-  }
-  return d.toISOString().replace(/\.\d{3}Z$/, 'Z');
-};
+import { toUTCISOString } from '../utils/dateFormat';
 
 export const getAllContacts = () => {
   try {

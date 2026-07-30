@@ -52,3 +52,18 @@ export const validateOptionalTime = (time) => {
   if (!time || !time.trim()) return { valid: true, message: '' };
   return validateTime(time);
 };
+
+/**
+ * Validate template days_before field. Accepts any integer (positive, zero,
+ * or negative) — negative values mean "after expiry," which is valid for
+ * follow-up/catch-up templates. Returns null instead of the standard
+ * {valid, message} shape so callers can do a simple truthy check:
+ *   const err = validateTemplateDays(daysBefore); if (err) { ... }
+ */
+export const validateTemplateDays = (daysBefore) => {
+  const trimmed = (daysBefore ?? '').toString().trim();
+  if (!trimmed) return 'Days before expiry is required.';
+  const parsed = parseInt(trimmed, 10);
+  if (isNaN(parsed)) return 'Days before expiry must be a valid number.';
+  return null; // valid
+};

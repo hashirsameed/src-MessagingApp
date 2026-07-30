@@ -1,4 +1,5 @@
 import { toPakistanParts, pakistanPartsToUtcMs, formatPakistanDate } from './pakistanTime';
+import { formatNearDay } from './dateFormat';
 import { classifyTiming } from './expiryTiming';
 
 /**
@@ -60,14 +61,14 @@ export const findMatchingTemplate = (templates, daysLeft) => {
 };
 
 // Short inline wording for {days} inside a message — "Today"/"Tomorrow"/
-// "Yesterday" for the near cases, "3 days"/"3 days ago" otherwise. Kept
-// deliberately shorter than dateFormat.js's formatDaysLabel() (no "before/
-// after expiry" suffix) since {days} sits inside the template author's own
-// sentence, e.g. "Dear {name}! Days {days}" or "{days} din baaki hain".
+// "Yesterday" for the near cases (delegated to shared formatNearDay),
+// "3 days"/"3 days ago" otherwise. Kept deliberately shorter than
+// dateFormat.js's formatDaysLabel() (no "before/after expiry" suffix)
+// since {days} sits inside the template author's own sentence, e.g.
+// "Dear {name}! Days {days}" or "{days} din baaki hain".
 const formatDaysLeftInline = (n) => {
-  if (n === 0) return 'Today';
-  if (n === 1) return 'Tomorrow';
-  if (n === -1) return 'Yesterday';
+  const near = formatNearDay(n);
+  if (near !== null) return near;
   return n > 0 ? `${n} days` : `${Math.abs(n)} days ago`;
 };
 

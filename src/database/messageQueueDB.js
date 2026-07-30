@@ -1,6 +1,8 @@
 import { getDB } from './db';
 import { handleError } from '../utils/errorHandler';
 import { debugTrace, debugTraceDbWrite, debugTraceError, debugTraceDuration } from '../utils/debugTrace';
+import { generateQueueId, generateClaimToken } from '../utils/idUtils';
+import { toUTCISOString } from '../utils/dateFormat';
 
 export const QUEUE_STATUS = {
   PENDING: 'PENDING',
@@ -10,9 +12,7 @@ export const QUEUE_STATUS = {
   SUPERSEDED: 'SUPERSEDED',
 };
 
-const getCurrentUtcISO = () => {
-  return new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
-};
+const getCurrentUtcISO = () => toUTCISOString(new Date());
 
 /**
  * EXPORTED: Read-only getter used by other modules (alarmFireCore.js,
@@ -85,7 +85,7 @@ export const addToQueueDetailed = (contactId, templateId, platformId, scheduledF
     // Fix:   5-char random suffix lagao taake same-millisecond calls bhi unique
     //         IDs banayein.
     // ─────────────────────────────────────────────────────────────────────────
-    const id = `${contactId}_${templateId}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const id = generateQueueId(contactId, templateId);
     const createdAtISO = getCurrentUtcISO();
     const scheduleTime = scheduledForISO || createdAtISO;
     
@@ -167,7 +167,7 @@ export const claimPendingQueue = (callerId = null, limit = 50) => {
     const ids = dueRows.map((r) => r.id);
     const placeholders = ids.map(() => '?').join(',');
     
-    const claimToken = `${callerId ?? 'unknown'}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const claimToken = generateClaimToken(callerId);
 
     debugTraceDbWrite('ClaimPendingQueueUpdate', {
       table: 'message_queue', pk: ids.join(','), oldState: QUEUE_STATUS.PENDING, newState: QUEUE_STATUS.CLAIMED,
@@ -415,7 +415,7 @@ export const claimSpecificQueueItem = (id, callerId = null) => {
 
     if (!row || row.status !== 'PENDING') return null;
 
-    const claimToken = `${callerId ?? 'unknown'}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const claimToken = generateClaimToken(callerId);
 
     db.execute(
       `UPDATE message_queue SET status = 'CLAIMED', claimed_by = ? WHERE id = ? AND status = 'PENDING';`,
@@ -430,17 +430,3 @@ export const claimSpecificQueueItem = (id, callerId = null) => {
   }
 };
 
-export const countSmsSentInLastHour = () => {
-  try {
-    const db = getDB();
-    const result = db.execute(
-      `SELECT COUNT(*) as count FROM message_queue
-       WHERE platform_id = 'sms' AND status = 'SENT'
-       AND datetime(sent_at) >= datetime('now', '-60 minutes');`,
-    );
-    return result.rows?._array?.[0]?.count ?? 0;
-  } catch (error) {
-    handleError(error, 'countSmsSentInLastHour');
-    return 0;
-  }
-};

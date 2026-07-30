@@ -51,8 +51,9 @@ export const pakistanDayStartMs = (date = new Date()) => {
 /**
  * Formats an ISO/date value as Pakistan date+time, e.g. "04 Jul 2026, 5:00 PM",
  * always in Asia/Karachi regardless of device timezone.
+ * @param {boolean} [showSuffix=true]  Append " PKT" to the formatted string.
  */
-export const formatPakistanDateTime = (isoOrDate) => {
+export const formatPakistanDateTime = (isoOrDate, showSuffix = true) => {
   if (!isoOrDate) return '—';
   const date = typeof isoOrDate === 'string' ? new Date(isoOrDate) : isoOrDate;
   if (Number.isNaN(date.getTime())) return '—';
@@ -69,7 +70,7 @@ export const formatPakistanDateTime = (isoOrDate) => {
     hour12: true,
     timeZone: PAKISTAN_TIME_ZONE,
   });
-  return `${datePart}, ${timePart} PKT`;
+  return showSuffix ? `${datePart}, ${timePart} PKT` : `${datePart}, ${timePart}`;
 };
 
 // Date-only, no time-of-day — for the {expiry} token in outgoing messages.

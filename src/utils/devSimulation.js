@@ -1,13 +1,8 @@
 import { getExpiringContacts } from '../database/contactDB';
 import { getActiveTemplates } from '../database/templateDB';
-import { findMatchingTemplates, personalizeMessage } from './templateMatcher';
+import { findMatchingTemplates, personalizeMessage, getDaysUntilExpiry } from './templateMatcher';
 import { isTemplateAlarmDue, computeTargetAlarmTimestamp } from './alarmScheduler';
-import { getDaysUntilExpiry } from './templateMatcher';
-
-// Same bounds as schedulerEngine.runExpiryCheck.
-const FAR_PAST_YEARS = 20;
-const FAR_FUTURE_YEARS = 2;
-const MAX_TEMPLATE_GRACE_PERIOD_MS = 60 * 60 * 1000; // 1 hour
+import { FAR_PAST_YEARS, FAR_FUTURE_YEARS, MAX_TEMPLATE_GRACE_PERIOD_MS } from './schedulerConstants';
 
 // templateMatcher's getDaysUntilExpiry now accepts an optional `nowMs` so
 // this simulator just anchors to whatever "now" the Dev Testing Lab is

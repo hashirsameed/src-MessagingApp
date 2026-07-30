@@ -6,8 +6,9 @@ import {
 import { getAllContacts } from '../database/contactDB';
 import { getAllTemplates } from '../database/templateDB';
 import { getAllPlatforms } from '../database/platformDB';
-import { getRateLimit, countSentInWindow } from '../database/rateLimitDB';
-import { getInFlightCount, reserveSlot, releaseSlot } from './rateLimitReservation';
+import { getRateLimit } from '../database/rateLimitDB';
+import { reserveSlot, releaseSlot } from './rateLimitReservation';
+import { isRateLimited, validateQueueItem, normalizeDispatchResult } from './queueUtils';
 import { scheduleRateLimitRetryAlarm } from './rateLimitRetryAlarm';
 import { getDaysUntilExpiry, personalizeMessage } from './templateMatcher';
 import { handleError } from './errorHandler';
@@ -119,26 +120,21 @@ const processLane = async (platformId, items, ctx) => {
 
   for (let i = 0; i < items.length; i++) {
     // --- RATE LIMIT CHECK — break the whole lane immediately, batch-revert ---
-    // Recomputed fresh each iteration (dbSent + inFlight, not a cached
-    // local counter) so this sees reservations made by a *concurrent*
-    // processSingleItem() call for the same platform (e.g. a native
-    // alarm firing mid-batch) — a cached counter would miss those and
-    // let this lane over-send past the limit.
-    let currentSent = 0;
-    if (rateLimit) {
-      currentSent = countSentInWindow(platformId, rateLimit.windowMinutes)
-        + getInFlightCount(platformId, rateLimit.windowMinutes);
-    }
-    if (rateLimit && currentSent >= rateLimit.limitCount) {
-      const remaining = items.slice(i);
-      debugTrace('ProcessLaneRateLimitBreak', {
-        traceId, platformId, remainingCount: remaining.length,
-        currentSent, limitCount: rateLimit.limitCount, windowMinutes: rateLimit.windowMinutes,
-      });
-      revertBatchToPending(remaining.map((r) => r.id), traceId);
-      summary.rateLimited += remaining.length;
-      rateLimitedPlatformIds.add(platformId);
-      break;
+    // Shared helper isRateLimited() counts DB-sent + in-flight reservations,
+    // recomputed fresh each iteration so concurrent processSingleItem calls
+    // don't let this lane over-send.
+    {
+      const { limited: rateLimitedNow } = isRateLimited(platformId, rateLimit);
+      if (rateLimitedNow) {
+        const remaining = items.slice(i);
+        debugTrace('ProcessLaneRateLimitBreak', {
+          traceId, platformId, remainingCount: remaining.length,
+        });
+        revertBatchToPending(remaining.map((r) => r.id), traceId);
+        summary.rateLimited += remaining.length;
+        rateLimitedPlatformIds.add(platformId);
+        break;
+      }
     }
 
     const item = items[i];
@@ -154,36 +150,16 @@ const processLane = async (platformId, items, ctx) => {
     const contact  = contactMap.get(item.contact_id);
     const template = templateMap.get(item.template_id);
 
-    // --- VALIDATION CHECKS (unchanged) ---
-    if (!contact || !template || !platform) {
-      const reason = [
-        !contact  && 'CONTACT_NOT_FOUND',
-        !template && 'TEMPLATE_NOT_FOUND',
-        !platform && 'PLATFORM_NOT_FOUND',
-      ].filter(Boolean).join('_AND_');
-      debugTrace('ProcessQueueItemValidationFailed', { ...traceContext, exitReason: reason });
-      markAsFailed(item.id, reason, traceId);
-      summary.failed += 1;
-      onProgress?.(summary.processed, claimedTotal);
-      continue;
-    }
-
-    const needsEmail = platformId === 'email' || platformId === 'gmail' || (platform.url_scheme ?? '').includes('{email}');
-    if (needsEmail && !contact.email) {
-      debugTrace('ProcessQueueItemValidationFailed', { ...traceContext, exitReason: 'email_missing_on_contact' });
-      markAsFailed(item.id, 'EMAIL_MISSING_ON_CONTACT', traceId);
-      summary.failed += 1;
-      onProgress?.(summary.processed, claimedTotal);
-      continue;
-    }
-
-    const needsPhone = platformId === 'sms' || platformId === 'whatsapp' || (platform.url_scheme ?? '').includes('{phone}');
-    if (needsPhone && !contact.phone_number) {
-      debugTrace('ProcessQueueItemValidationFailed', { ...traceContext, exitReason: 'phone_missing_on_contact' });
-      markAsFailed(item.id, 'PHONE_MISSING_ON_CONTACT', traceId);
-      summary.failed += 1;
-      onProgress?.(summary.processed, claimedTotal);
-      continue;
+    // --- VALIDATION (shared helper) ---
+    {
+      const validationError = validateQueueItem(item, contact, template, platform);
+      if (validationError) {
+        debugTrace('ProcessQueueItemValidationFailed', { ...traceContext, exitReason: validationError });
+        markAsFailed(item.id, validationError, traceId);
+        summary.failed += 1;
+        onProgress?.(summary.processed, claimedTotal);
+        continue;
+      }
     }
 
     // ========================================================================
@@ -221,10 +197,8 @@ const processLane = async (platformId, items, ctx) => {
       }
       debugTrace('DispatchItemAfter', { ...traceContext, rawResult });
 
-      // Normalize both adapter contracts into one shape: localTextAdapter
-      // (SMS/Email/Gmail) returns a plain string; whatsappAdapter returns an
-      // object so it can carry retryAfterMs alongside status.
-      const outcome = typeof rawResult === 'string' ? { status: rawResult } : rawResult;
+      // Normalize outcome via shared helper
+      const outcome = normalizeDispatchResult(rawResult);
 
       if (outcome.status === 'sent') {
         markAsSent(item.id, traceId);
@@ -434,27 +408,15 @@ export const processSingleItem = async (queueId, traceId = null) => {
       return { sent: 0, failed: 0 };
     }
 
-    // --- RATE LIMIT CHECK — same guard processLane() applies, but here for
-    // a single item since fireScheduledPair goes straight through this
-    // path (native alarm → one item), never through processLane. Without
-    // this, an exact-alarm-triggered send would bypass the configured
-    // limit entirely for every platform except WhatsApp's own post-hoc
-    // 429 (rate_limited_WA) — e.g. SMS had no pre-send limit check here.
-    //
-    // dbSent + inFlight (not just dbSent) — two alarms firing close
-    // together would otherwise both read the same DB count before either
-    // finishes its (slow, async) dispatch and both pass. reserveSlot()
-    // happens in this same synchronous block, so no other concurrent call
-    // can slip in between the check and the reservation. ---
+    // --- RATE LIMIT CHECK (shared helper) ---
     const rateLimit = getRateLimit(claimed.platform_id);
     let reservationId = null;
     if (rateLimit) {
-      const dbSent = countSentInWindow(claimed.platform_id, rateLimit.windowMinutes);
-      const inFlight = getInFlightCount(claimed.platform_id, rateLimit.windowMinutes);
-      if (dbSent + inFlight >= rateLimit.limitCount) {
+      const { limited: rateLimitedNow, currentSent } = isRateLimited(claimed.platform_id, rateLimit);
+      if (rateLimitedNow) {
         debugTrace('ProcessSingleItemRateLimited', {
           traceId: tid, queueId, platformId: claimed.platform_id,
-          dbSent, inFlight, limitCount: rateLimit.limitCount, windowMinutes: rateLimit.windowMinutes,
+          currentSent, limitCount: rateLimit.limitCount, windowMinutes: rateLimit.windowMinutes,
         });
         revertToPending(queueId, tid);
         await scheduleRateLimitRetryAlarm(claimed.platform_id);
@@ -477,29 +439,11 @@ export const processSingleItem = async (queueId, traceId = null) => {
     const template = templateMap.get(claimed.template_id);
     const platform = platformMap.get(claimed.platform_id);
 
-    // Validation
-    if (!contact || !template || !platform) {
-      const reason = [
-        !contact  && 'CONTACT_NOT_FOUND',
-        !template && 'TEMPLATE_NOT_FOUND',
-        !platform && 'PLATFORM_NOT_FOUND',
-      ].filter(Boolean).join('_AND_');
-      debugTrace('ProcessSingleItemValidationFailed', { traceId: tid, queueId, reason });
-      markAsFailed(queueId, reason, tid);
-      return { sent: 0, failed: 1 };
-    }
-
-    const needsEmail = (claimed.platform_id === 'email' || claimed.platform_id === 'gmail')
-      || (platform.url_scheme ?? '').includes('{email}');
-    if (needsEmail && !contact.email) {
-      markAsFailed(queueId, 'EMAIL_MISSING_ON_CONTACT', tid);
-      return { sent: 0, failed: 1 };
-    }
-
-    const needsPhone = claimed.platform_id === 'sms' || claimed.platform_id === 'whatsapp'
-      || (platform.url_scheme ?? '').includes('{phone}');
-    if (needsPhone && !contact.phone_number) {
-      markAsFailed(queueId, 'PHONE_MISSING_ON_CONTACT', tid);
+    // Validation (shared helper)
+    const validationError = validateQueueItem(claimed, contact, template, platform);
+    if (validationError) {
+      debugTrace('ProcessSingleItemValidationFailed', { traceId: tid, queueId, reason: validationError });
+      markAsFailed(queueId, validationError, tid);
       return { sent: 0, failed: 1 };
     }
 
@@ -527,7 +471,7 @@ export const processSingleItem = async (queueId, traceId = null) => {
       if (reservationId !== null) releaseSlot(claimed.platform_id, reservationId);
     }
 
-    const outcome = typeof rawResult === 'string' ? { status: rawResult } : rawResult;
+    const outcome = normalizeDispatchResult(rawResult);
 
     if (outcome.status === 'sent' || outcome.status === 'opened') {
       markAsSent(queueId, tid);

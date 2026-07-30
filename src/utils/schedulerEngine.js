@@ -4,14 +4,9 @@ import { addToQueue } from '../database/messageQueueDB';
 import { getDefaultPlatform } from '../database/settingsDB';
 import { getDaysUntilExpiry, findMatchingTemplates } from './templateMatcher';
 import { handleError } from './errorHandler';
-import { isTemplateAlarmDue, computeTargetAlarmTimestamp } from './alarmScheduler';
+import { isTemplateAlarmDue, computeTargetAlarmTimestamp, wasAlarmTargetBeforeContactCreated } from './alarmScheduler';
 import { debugTrace, debugTraceError, debugTraceDuration, generateTraceId } from './debugTrace';
-
-// No lower bound — overdue contacts from any point in the past are still
-// eligible for after-expiry (negative days_before) templates. Upper bound
-// stays generous to cover long before-expiry windows too.
-const FAR_PAST_YEARS   = 20;
-const FAR_FUTURE_YEARS = 2;
+import { FAR_PAST_YEARS, FAR_FUTURE_YEARS, MAX_TEMPLATE_GRACE_PERIOD_MS } from './schedulerConstants';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // FIX 3 — runExpiryCheck re-entrancy guard
@@ -21,11 +16,6 @@ const FAR_FUTURE_YEARS = 2;
 // Fix:   Module-level _checkInProgress flag. Doosri call foran return karti hai.
 // ─────────────────────────────────────────────────────────────────────────────
 let _checkInProgress = false;
-
-// Maximum grace period (in ms) after a template's exact send_time during which
-// it is still eligible to be picked up by the scheduler. This prevents a 
-// template scheduled for 5 PM from being picked up at 8 PM.
-const MAX_TEMPLATE_GRACE_PERIOD_MS = 60 * 60 * 1000; // 1 hour
 
 export const runExpiryCheck = async (parentTraceId = null) => {
   // FIX 3 — Re-entrancy guard: agar pehle se chal raha hai to foran return karo
@@ -64,20 +54,29 @@ export const runExpiryCheck = async (parentTraceId = null) => {
     expiringContacts.forEach((contact) => {
       const daysLeft = getDaysUntilExpiry(contact.expiry_datetime);
       
+      // ── Single-pass filter: compute alarmMs ONCE per template ─────────
+      // Previously isTemplateAlarmDue() called computeTargetAlarmTimestamp
+      // internally, then the grace-window check called it AGAIN, doubling
+      // Pakistan-time conversions per (contact, template) pair. Now alarmMs
+      // is cached and reused for both checks.
+      const windowSkipped = { count: 0 };
       const matched  = findMatchingTemplates(templates, daysLeft).filter((template) => {
-        // 1. The alarm time must have arrived (existing logic)
-        if (!isTemplateAlarmDue(contact, template, nowMs)) return false;
-        
-        // 2. STRICT TIME WINDOW CHECK:
-        // Only pick this template if its scheduled time is within the grace period.
-        // This ensures that if multiple templates exist for the same days_before,
-        // ONLY the one whose exact send_time has recently arrived is picked.
+        // Compute once, use twice — avoids redundant Pakistan-time conversion
         const alarmMs = computeTargetAlarmTimestamp(contact, template);
         if (alarmMs === null) return false;
-        
+
+        // 1. Not before contact creation AND time must have arrived
+        if (wasAlarmTargetBeforeContactCreated(contact, alarmMs)) return false;
+        if (alarmMs > nowMs) return false;
+
+        // 2. STRICT TIME WINDOW CHECK:
+        // Only pick this template if its scheduled time is within the grace
+        // period. Prevents a template scheduled for 5 PM from being picked
+        // up at 8 PM. Count skipped-for-window templates during the main
+        // pass instead of re-filtering later.
         const timeSinceAlarm = nowMs - alarmMs;
         const inWindow = timeSinceAlarm >= 0 && timeSinceAlarm <= MAX_TEMPLATE_GRACE_PERIOD_MS;
-        
+
         debugTrace('TemplateTimeWindowCheck', {
           traceId,
           contactId: contact.id,
@@ -88,7 +87,8 @@ export const runExpiryCheck = async (parentTraceId = null) => {
           timeSinceAlarmMs: timeSinceAlarm,
           inWindow,
         });
-        
+
+        if (!inWindow) windowSkipped.count += 1;
         return inWindow;
       });
 
@@ -103,17 +103,13 @@ export const runExpiryCheck = async (parentTraceId = null) => {
       });
 
       if (matched.length === 0) {
-        // Check if it was skipped due to time window
-        const allDueTemplates = findMatchingTemplates(templates, daysLeft).filter((t) => 
-          isTemplateAlarmDue(contact, t, nowMs)
-        );
-        if (allDueTemplates.length > 0) {
-          skippedTimeWindow += allDueTemplates.length;
-          debugTrace('ExpiryCheckContactSkippedTimeWindow', { 
-            traceId, 
-            contactId: contact.id, 
+        if (windowSkipped.count > 0) {
+          skippedTimeWindow += windowSkipped.count;
+          debugTrace('ExpiryCheckContactSkippedTimeWindow', {
+            traceId,
+            contactId: contact.id,
             exitReason: 'outside_time_window',
-            dueButSkippedCount: allDueTemplates.length,
+            dueButSkippedCount: windowSkipped.count,
           });
         } else {
           skippedNoTemplate += 1;
@@ -155,24 +151,34 @@ export const runExpiryCheck = async (parentTraceId = null) => {
     // processQueue() itself is cheap to call with nothing to do — it exits
     // immediately if claimPendingQueue() finds no PENDING rows.
     // ─────────────────────────────────────────────────────────────────────────
-    // FIX — Messages ab foran send nahi hote
-    // Masla: runExpiryCheck ke baad foran processQueue() call hota tha, jis
-    //         se har message save hone ke turant baad claim + send ho jata tha
-    //         — chahe uska scheduled_for time abhi na aaya ho.
-    // Fix:   Turant processQueue() call hata diya. Messages apne scheduled_for
-    //         time par native alarm / SafetyNetTask / foreground resume ke
-    //         through process honge. claimPendingQueue() pehle se
-    //         `datetime(scheduled_for) <= datetime('now')` check lagata hai.
+    // FIX — Present-due messages process karo
+    // Masla: runExpiryCheck ke baad foran processQueue() nahi hota tha, is
+    //         liye messages jo "abhi" due hain (e.g. contact 6:59 par add hua
+    //         aur expiry bhi 6:59) queue mein PENDING reh jaate the aur koi
+    //         native alarm bhi schedule nahi hota (kyunke timestamp already
+    //         present/past hai) — result: message 15 min tak nahi jaata.
+    // Fix:   Sirf tab processQueue() call karo jab kuch QUEUED ho. Is waqt
+    //         claimPendingQueue() pehle se `datetime(scheduled_for) <=
+    //         datetime('now')` guard lagata hai, to sirf genuinely-due items
+    //         claim hote hain — future items untouched. `countPriorSends()`
+    //         + `_isProcessing` guard duplicate send bhi rokta hai.
     // ─────────────────────────────────────────────────────────────────────────
+    if (queued > 0) {
+      debugTrace('RunExpiryCheckTriggerProcessQueue', { traceId, queued });
+      const { processQueue } = require('./queueProcessor');
+      processQueue(undefined, traceId).catch((err) => {
+        debugTraceError('RunExpiryCheckProcessQueueCatch', err, { traceId });
+      });
+    }
 
-    debugTraceDuration('RunExpiryCheckEnd', startTime, { 
-      traceId, 
-      outcome: 'completed', 
-      queued, 
+    debugTraceDuration('RunExpiryCheckEnd', startTime, {
+      traceId,
+      outcome: 'completed',
+      queued,
       skippedNoTemplate,
       skippedTimeWindow,
     });
-    
+
     return { checked: expiringContacts.length, queued, skippedNoTemplate, skippedTimeWindow };
   } catch (error) {
     debugTraceError('RunExpiryCheckCatch', error, { function: 'runExpiryCheck', traceId });

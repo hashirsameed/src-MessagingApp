@@ -4,14 +4,14 @@ import {
   StyleSheet, KeyboardAvoidingView, Platform, ScrollView, StatusBar, Keyboard,
 } from 'react-native';
 import { updateTemplate } from '../database/templateDB';
-import { getAllContacts } from '../database/contactDB';
 import { getCachedApprovedWhatsAppTemplates } from '../database/whatsappTemplateCacheDB';
-import { rescheduleAlarmsForTemplate } from '../utils/alarmScheduler';
+import { rescheduleAlarmsForTemplateId } from '../utils/alarmScheduler';
 import { handleError, showError, showSuccess, ErrorMessages } from '../utils/errorHandler';
 import { validateTemplateTitle, validateTemplateBody, validateOptionalTime } from '../utils/validators';
 import { parse12HourTimeTo24Hour, split24HourTimeTo12Hour, formatDaysLabel } from '../utils/dateFormat';
-import { personalizeMessage } from '../utils/templateMatcher';
 import PlatformPicker from '../components/PlatformPicker';
+import WhatsAppTemplatePicker from '../components/WhatsAppTemplatePicker';
+import useTemplatePreview from '../hooks/useTemplatePreview';
 
 export default function EditTemplateScreen({ navigation, route }) {
   const { template, onSave } = route.params;
@@ -103,11 +103,9 @@ export default function EditTemplateScreen({ navigation, route }) {
       }
 
       if (Platform.OS === 'android') {
-        const allContacts = getAllContacts();
-        const results = await rescheduleAlarmsForTemplate(updated, allContacts);
+        const results = await rescheduleAlarmsForTemplateId(updated);
         console.log(`[EditTemplateScreen] Resynced ${results.length} alarm(s) for "${updated.title}"`);
       }
-
       onSave?.();
       showSuccess('Template Updated', 'Template has been updated successfully.', () => navigation.goBack());
     } catch (error) {
@@ -118,20 +116,7 @@ export default function EditTemplateScreen({ navigation, route }) {
     }
   };
 
-  // Preview uses the exact days_before number currently in the form — the
-  // real value that will be used at send time — not a literal {days} token.
-  const previewDaysBefore = (() => {
-    const d = parseInt(daysBefore, 10);
-    return isNaN(d) ? 0 : d;
-  })();
-  const previewSampleContact = {
-    name: 'John Doe',
-    phone_number: '0300-1234567',
-    expiry_datetime: new Date(Date.now() + previewDaysBefore * 24 * 60 * 60 * 1000).toISOString(),
-  };
-  const previewBodyText = body.trim()
-    ? personalizeMessage(body, previewSampleContact, previewDaysBefore)
-    : 'Message body will appear here...';
+  const { previewDaysBefore, previewBodyText } = useTemplatePreview(body, daysBefore);
 
   return (
     <KeyboardAvoidingView
@@ -244,40 +229,12 @@ export default function EditTemplateScreen({ navigation, route }) {
           <View style={styles.divider} />
 
           {isWhatsApp ? (
-            <>
-              <Text style={styles.label}>WhatsApp Template</Text>
-              <Text style={styles.hint}>
-                Only APPROVED templates can be scheduled.
-              </Text>
-              {approvedWaTemplates.length === 0 ? (
-                <View style={styles.waEmptyBox}>
-                  <Text style={styles.waEmptyText}>
-                    No approved WhatsApp templates found yet. Open the WhatsApp tab to sync.
-                  </Text>
-                </View>
-              ) : (
-                approvedWaTemplates.map((t) => {
-                  const selected = metaTemplateName === t.name;
-                  return (
-                    <TouchableOpacity
-                      key={t.name}
-                      style={[styles.waTemplateCard, selected && styles.waTemplateCardSelected]}
-                      onPress={() => selectMetaTemplate(t)}
-                      activeOpacity={0.8}>
-                      <View style={styles.waTemplateTop}>
-                        <Text style={styles.waTemplateName}>{t.name}</Text>
-                        {selected && <Text style={styles.waTemplateCheck}>✓</Text>}
-                      </View>
-                      <Text style={styles.waTemplateMeta}>{t.category} · {t.language}</Text>
-                      {t.body ? (
-                        <Text style={styles.waTemplateBody} numberOfLines={2}>{t.body}</Text>
-                      ) : null}
-                    </TouchableOpacity>
-                  );
-                })
-              )}
-              {errors.metaTemplate ? <Text style={styles.errorText}>{errors.metaTemplate}</Text> : null}
-            </>
+            <WhatsAppTemplatePicker
+              templates={approvedWaTemplates}
+              selected={metaTemplateName}
+              onSelect={selectMetaTemplate}
+              error={errors.metaTemplate}
+            />
           ) : (
             <>
               <Text style={styles.label}>Message Body</Text>

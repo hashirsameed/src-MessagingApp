@@ -74,8 +74,7 @@ export const clearRateLimit = (platformId) => {
 };
 
 // How many messages this platform has actually sent within its own
-// rolling window (right now). Generic replacement for the old SMS-only
-// countSmsSentInLastHour() — same rolling-window approach, any platform,
+// rolling window (right now). Same rolling-window approach, any platform,
 // any window length.
 export const countSentInWindow = (platformId, windowMinutes) => {
   try {

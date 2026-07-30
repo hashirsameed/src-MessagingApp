@@ -11,6 +11,7 @@ import {
 } from '../database/scheduledAlarmDB';
 import { debugTrace, debugTraceError, debugTraceDuration, generateTraceId } from './debugTrace';
 import { toPakistanParts, pakistanPartsToUtcMs } from './pakistanTime';
+import { toUTCISOString } from './dateFormat';
 
 import { getAllTemplates } from '../database/templateDB';
 import { getAllContacts } from '../database/contactDB';
@@ -262,7 +263,7 @@ export const scheduleAlarm = async (contactId, templateId, timestampMs) => {
   debugTrace('ScheduleAlarmStart', { traceId, contactId, templateId, timestampMs });
 
   try {
-    const triggerAtISO = new Date(timestampMs).toISOString().replace(/\.\d{3}Z$/, 'Z');
+    const triggerAtISO = toUTCISOString(new Date(timestampMs));
     const existing = getScheduledAlarm(contactId, templateId);
     
     if (
@@ -464,6 +465,18 @@ export const cancelAlarmsForPlatform = async (platformId) => {
     total += await cancelAlarmsForTemplate(template.id);
   }
   return total;
+};
+
+/**
+ * Convenience wrapper: loads all contacts internally, then reschedules alarms
+ * for the given template across every contact. Used by screen components so
+ * they don't each independently call getAllContacts().
+ */
+export const rescheduleAlarmsForTemplateId = async (template) => {
+  // Dynamic require to avoid circular dependency with contactDB
+  const { getAllContacts } = require('../database/contactDB');
+  const allContacts = getAllContacts();
+  return rescheduleAlarmsForTemplate(template, allContacts);
 };
 
 export const rescheduleAlarmsForPlatform = async (platformId) => {

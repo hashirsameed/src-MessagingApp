@@ -6,11 +6,10 @@ import {
 import { useFocusEffect } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { getAllTemplates, deleteTemplate, toggleTemplateActive } from '../database/templateDB';
-import { getAllContacts } from '../database/contactDB';
 import { getEnabledPlatforms, seedDefaultPlatforms } from '../database/platformDB';
 import { syncWhatsAppTemplatesCache } from '../database/whatsappTemplateCacheDB';
 import { fetchMetaTemplates } from '../utils/metaTemplateService';
-import { cancelAlarmsForTemplate, rescheduleAlarmsForTemplate } from '../utils/alarmScheduler';
+import { cancelAlarmsForTemplate, rescheduleAlarmsForTemplateId } from '../utils/alarmScheduler';
 import { formatTemplateSendTime, formatDaysLabel } from '../utils/dateFormat';
 import { handleError, showError, showConfirm, ErrorMessages } from '../utils/errorHandler';
 import { InlineLoader } from '../components/LoadingSpinner';
@@ -111,8 +110,7 @@ export default function TemplatesScreen({ navigation }) {
 
       if (Platform.OS === 'android') {
         const updatedTemplate = { ...item, is_active: value ? 1 : 0 };
-        const allContacts = getAllContacts();
-        const results = await rescheduleAlarmsForTemplate(updatedTemplate, allContacts);
+        const results = await rescheduleAlarmsForTemplateId(updatedTemplate);
         console.log(`[TemplatesScreen] Template "${item.title}" toggled ${value ? 'ON' : 'OFF'} — ${results.length} alarm(s) affected`);
       }
     } catch (error) {

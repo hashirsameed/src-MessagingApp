@@ -1,44 +1,34 @@
-import { PAKISTAN_TIME_ZONE } from './pakistanTime';
+import { formatPakistanDateTime } from './pakistanTime';
 
-export const formatDateTime12Hour = (iso) => {
-  if (!iso) return '—';
-
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return '—';
-
-  const datePart = date.toLocaleDateString('en-GB', {
-    day: '2-digit',
-    month: 'short',
-    year: 'numeric',
-    timeZone: PAKISTAN_TIME_ZONE,
-  });
-
-  const timePart = date.toLocaleTimeString('en-US', {
-    hour: 'numeric',
-    minute: '2-digit',
-    hour12: true,
-    timeZone: PAKISTAN_TIME_ZONE,
-  });
-
-  return `${datePart}, ${timePart}`;
+/**
+ * Normalize a date-like input to a UTC ISO string with zero-millisecond
+ * precision ("YYYY-MM-DDTHH:mm:ssZ"). Used by all DB write paths so stored
+ * timestamps are consistent and sortable via datetime().
+ */
+export const toUTCISOString = (input) => {
+  const d = input instanceof Date ? input : new Date(input);
+  if (isNaN(d.getTime())) {
+    throw new Error(`Invalid datetime value: ${input}`);
+  }
+  return d.toISOString().replace(/\.\d{3}Z$/, 'Z');
 };
 
-export const formatExpiryDate12Hour = (iso) => formatDateTime12Hour(iso);
+/**
+ * Format an ISO UTC string to Pakistan date+time, e.g. "04 Jul 2026, 5:00 PM".
+ * Delegates to formatPakistanDateTime() without the " PKT" suffix.
+ */
+export const formatDateTime12Hour = (iso) => formatPakistanDateTime(iso, false);
 
-export const formatTemplateSendTime = (time24) => {
-  if (!time24) return 'At expiry time';
-
-  const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(time24);
-  if (!match) return 'At expiry time';
-
-  let hours = parseInt(match[1], 10);
-  const minutes = match[2];
-  const meridiem = hours >= 12 ? 'PM' : 'AM';
-
-  if (hours === 0) hours = 12;
-  else if (hours > 12) hours -= 12;
-
-  return `${hours}:${minutes} ${meridiem}`;
+/**
+ * Common near-day labels shared by formatDaysLabel (screens) and
+ * formatDaysLeftInline (template body tokens). Returns null for non-near days
+ * so each caller can apply its own far-day wording.
+ */
+export const formatNearDay = (n) => {
+  if (n === 0) return 'Today';
+  if (n === 1) return 'Tomorrow';
+  if (n === -1) return 'Yesterday';
+  return null;
 };
 
 export const split24HourTimeTo12Hour = (time24) => {
@@ -74,13 +64,17 @@ export const parse12HourTimeTo24Hour = (time, meridiem) => {
   return `${String(hours).padStart(2, '0')}:${minutes}`;
 };
 
+export const formatTemplateSendTime = (time24) => {
+  if (!time24) return 'At expiry time';
+  const parts = split24HourTimeTo12Hour(time24);
+  return parts.meridiem ? `${parts.time} ${parts.meridiem}` : 'At expiry time';
+};
+
 // n > 0 = days remaining before expiry, n < 0 = days passed after expiry, 0 = expiry day.
 export const formatDaysLabel = (daysBefore) => {
   const n = daysBefore ?? 0;
-
-  if (n === 0) return 'Today';
-  if (n === 1) return 'Tomorrow';
-  if (n === -1) return 'Yesterday';
+  const near = formatNearDay(n);
+  if (near !== null) return near;
 
   return n > 0
     ? `${n} days before expiry`
