@@ -23,9 +23,19 @@ import WhatsAppTemplatesScreen from './src/screens/WhatsAppTemplatesScreen';
 // be a static top-level import — that would break the Metro bundle for
 // anyone who doesn't have the file on disk. Guard it behind __DEV__ and
 // a try/catch require so its absence never breaks the build for others.
+//
+// FIX — __DEV__ ke sath isDevModeOn() bhi check karo. Agar sirf __DEV__
+// hota to ye sirf local debug build mein hi require hota — ek test/QA
+// build (jahan file bundled hai lekin __DEV__ false hai) pe Dev Mode
+// Settings se toggle ON karne ke baad bhi require kabhi chalta hi nahi.
+// NOTE: agar ye file genuinely test-build APK mein bundled nahi hai (git
+// -ignored, sirf local machine pe hai), to isDevModeOn()=true hone se bhi
+// require fail hoga (try/catch usay chup-chap null kar dega) — ye sirf
+// runtime toggle ka gate hai, file ko bundle mein shamil karna alag
+// deployment step hai.
 // ─────────────────────────────────────────────────────────────────────────
 let DevTestScreen: React.ComponentType<any> | null = null;
-if (__DEV__) {
+if (__DEV__ || isDevModeOn()) {
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     DevTestScreen = require('./src/screens/DevTestScreen').default;
@@ -57,7 +67,15 @@ import { setContactListener } from './src/utils/contactEvents';
 // hai agar cache abhi tak load na hui ho (dekho devMode.js), to iske bina
 // bhi app crash ya galat value nahi degi, sirf pehla isDevModeOn() call
 // thoda extra (ek DB read) kaam karega.
-import { loadDevModeCache } from './src/utils/devMode';
+//
+// FIX — isDevModeOn() bhi yahan import kiya (naya function nahi banaya,
+// devMode.js mein already exist karta tha). Wajah: neeche DevTestScreen
+// ka gate pehle sirf raw __DEV__ (local debug build) check karta tha,
+// isDevModeOn() (jo settings-toggle se test/release build mein bhi dev
+// tools unlock karne ke liye specifically bana tha) kabhi check hi nahi
+// hota tha — is se "Testing Lab" tab test environment mein kabhi nahi
+// dikhta tha, chahe Dev Mode Settings se ON kyun na kar diya jaye.
+import { loadDevModeCache, isDevModeOn } from './src/utils/devMode';
 
 const Stack = createNativeStackNavigator();
 const Tab = createMaterialTopTabNavigator();
@@ -193,20 +211,41 @@ export default function App() {
   }, []);
 
   // Signal layer — reacts to contact INSERT/UPDATE/DELETE, keeps alarms in sync.
+  //
+  // FIX — present-due edge case (contact added/edited with an expiry that's
+  // already "now", e.g. added at 7:38 PM with expiry also 7:38 PM).
+  // Masla: scheduleAlarmsForContact() -> computeAlarmTimestamp() deliberately
+  //         returns null for any already-past target (alarmScheduler.js) —
+  //         correct, native exact alarms must not be scheduled for the past.
+  //         But scheduleAlarmsForContact() itself never calls addToQueue();
+  //         only schedulerEngine.js's runExpiryCheck() does that. Before this
+  //         fix, INSERT/UPDATE only called scheduleAlarmsForContact() — so a
+  //         genuinely present-due template just sat unqueued until the next
+  //         runExpiryCheck() run, which is either app foreground-resume or
+  //         the 15-minute FOREGROUND_CHECK_INTERVAL_MS timer. Result: message
+  //         looked "stuck", not actually broken — just up to 15 min late.
+  // Fix:   Call triggerExpiryCheck() right after scheduling alarms for an
+  //         INSERT or an UPDATE that changed the expiry, so anything due
+  //         "right now" gets queued (and processQueue()'d) immediately
+  //         instead of waiting for the next cycle. Reusing the existing
+  //         triggerExpiryCheck() (which itself reuses runExpiryCheck()) —
+  //         no new function added.
   useEffect(() => {
     setContactListener(async (event: { type: string; contact?: any; contactId?: string; expiryChanged?: boolean }) => {
       if (Platform.OS !== 'android') return;
       const templates = getActiveTemplates();
       if (event.type === 'INSERT') {
         await scheduleAlarmsForContact(event.contact, templates);
+        triggerExpiryCheck('contact-insert');
       } else if (event.type === 'UPDATE' && event.expiryChanged) {
         await cancelAlarmsForContact(event.contact.id);
         await scheduleAlarmsForContact(event.contact, templates);
+        triggerExpiryCheck('contact-update');
       } else if (event.type === 'DELETE') {
         await cancelAlarmsForContact(event.contactId);
       }
     });
-  }, []);
+  }, [triggerExpiryCheck]);
 
   useEffect(() => {
     // FIX — dev-mode cache ko sabse pehle warm karo, kisi bhi screen ke
@@ -320,7 +359,7 @@ export default function App() {
           options={{ title: 'Message Templates' }}
         />
 
-        {__DEV__ && DevTestScreen && (
+        {(__DEV__ || isDevModeOn()) && DevTestScreen && (
           <Stack.Screen
             name="DevTestLab"
             component={DevTestScreen}
