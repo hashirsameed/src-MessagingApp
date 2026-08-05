@@ -1,148 +1,168 @@
-# MessagingApp
+﻿# MessagingApp
 
-A React Native (bare) app for tracking contact expiry dates and automatically sending reminder messages — via SMS, WhatsApp, or a custom URL-scheme platform — on a schedule you define with reusable templates.
+MessagingApp is a React Native reminder application for managing contacts with expiry dates and sending timely follow-up messages. It is designed for use cases such as renewals, contract deadlines, subscriptions, or any situation where a person or business needs reminders before or after an important date.
 
-## What it does
+## What the app is built to do
 
-1. Add a contact with a name, phone number, and an expiry date/time.
-2. Create message templates like "7 days before expiry", "on expiry day", or "3 days after expiry", with a body that can reference `{name}`, `{phone}`, `{days}`, and `{expiry}`.
-3. The app matches active templates against each contact's expiry and queues a message when a template becomes due.
-4. Queued messages are sent automatically (SMS/WhatsApp) or opened for manual send via the selected platform's URL scheme.
-5. On Android, reminders are backed by native exact alarms, so they can fire even if the app is closed or the device is idle — plus a boot receiver, a WorkManager safety-net sweep, and a foreground 15-minute poll as a fallback.
+The app lets a user:
+
+- add contacts with a name, phone number, and expiry date/time
+- create reusable reminder templates such as "7 days before expiry", "on expiry day", or "3 days after expiry"
+- personalize each reminder using placeholders like {name}, {phone}, {days}, and {expiry}
+- queue reminders automatically when they become due
+- send those reminders through SMS, WhatsApp, or custom URL-based platforms
+
+## Core workflow
+
+1. A user adds a contact and sets an expiry date/time.
+2. The user creates one or more reminder templates with a relative offset such as -7, 0, or +3 days.
+3. The app evaluates each contact against the active templates and decides whether a reminder should be triggered.
+4. When a reminder becomes due, it is inserted into a local queue.
+5. The queue processor sends the message through the selected platform or opens a manual URL scheme for the user.
+
+## What makes this app different
+
+This project is not just a simple reminder list. It includes:
+
+- a scheduling engine that checks upcoming expiries and matches the correct templates
+- Android-native exact alarm support so reminders can fire even when the app is closed
+- background processing for headless reminder delivery
+- a queue system with deduplication, retry handling, and rate limiting
+- support for both automatic and manual message delivery paths
+- settings for default platform selection, WhatsApp configuration, and Android permission repair
+
+## Supported delivery channels
+
+### SMS
+
+- Uses Android SMS APIs when permission is available
+- Supports automatic sending from the queue processor
+- Includes rate limiting to avoid sending too many SMS messages in a short period
+
+### WhatsApp
+
+- Supports manual URL-based WhatsApp sending
+- Also supports configuration for WhatsApp Cloud API integration and Meta template workflows
+
+### Custom platforms
+
+- Users can define custom platforms using URL schemes
+- The app supports placeholder-based message construction for these integrations
+
+## Scheduling and reliability
+
+The reminder system has multiple layers:
+
+- a foreground scheduler that runs on startup, when the app returns to the foreground, and on a periodic interval
+- Android exact alarms for time-based reminders even when the app is not actively running
+- a WorkManager safety-net service for periodic re-checking on Android
+- boot-time rescheduling so alarms are restored after device restarts
+- a queue processor that claims pending items, dispatches them, and updates their status
+
+This makes the app more robust than a simple local timer and helps it survive app backgrounding or device restarts.
+
+## Data model and app state
+
+The app stores its state locally in SQLite and keeps separate tables for:
+
+- contacts
+- reminder templates
+- queued messages
+- scheduled alarms
+- user settings and platform configuration
+
+This allows the app to keep track of what has already been sent, what is still pending, and what alarms have already been triggered.
+
+## Project structure
+
+- App.tsx — app entry point, navigation, scheduler startup, and app-state handling
+- index.js — React Native registration and headless task setup
+- src/screens — UI for contacts, templates, queue, settings, and platform management
+- src/database — SQLite schema and database helpers
+- src/utils — scheduling logic, queue processing, delivery logic, template matching, and validation
+- android/app/src/main/java/com/messagingapp — Android-native reminder and delivery integration
+- docs/PROJECT_REPORT.md — full architecture notes, audit findings, and known issues
 
 ## Tech stack
 
-- React Native 0.86, React 19.2
-- Navigation: `@react-navigation` (native-stack + bottom-tabs)
-- Local storage: `react-native-quick-sqlite`
-- Secure credential storage: `react-native-keychain` (used for WhatsApp Cloud API credentials)
-- Android native modules (Kotlin): `AlarmManager`, `SmsManager`, Headless JS, WorkManager, AppWidgetProvider
-- Tests: Jest + `react-test-renderer`
+- React Native 0.86.0
+- React 19.2.3
+- Navigation with @react-navigation
+- Local storage with react-native-quick-sqlite and @op-engineering/op-sqlite
+- Secure credential storage with react-native-keychain
+- Kotlin native modules for alarms, SMS, WorkManager, and reminder surfaces
+- Jest with React Native test support
 
-## Project layout
+## Getting started
 
+### Prerequisites
+
+- Node.js 22.11 or newer
+- a working React Native development environment for Android and/or iOS
+- Android Studio for Android builds
+- CocoaPods for iOS builds
+
+### Install dependencies
+
+From the project folder:
+
+```sh
+npm install
 ```
-App.tsx                 Navigation root, foreground scheduler, AppState listener
-index.js                RN entry point + headless-task registration
-src/screens/            UI: contacts, templates, queue, settings, platforms, WhatsApp config
-src/database/           SQLite schema + CRUD (contacts, templates, platforms, settings, queue, alarms)
-src/utils/              Scheduling engine, queue processor, SMS/WhatsApp dispatch, validators
-android/.../messagingapp/  Native Kotlin: alarm scheduling, SMS bridge, boot recovery, home-screen widget
-docs/PROJECT_REPORT.md  Full architecture write-up, known issues, and audit notes
+
+### Start Metro
+
+```sh
+npm start
+```
+
+### Run on Android
+
+```sh
+npm run android
+```
+
+### Run on iOS
+
+```sh
+bundle install
+bundle exec pod install
+npm run ios
 ```
 
 ## Android permissions
 
-`INTERNET`, `SEND_SMS`, `READ_PHONE_STATE`, `SCHEDULE_EXACT_ALARM`, `RECEIVE_BOOT_COMPLETED`, `WAKE_LOCK`, `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`, `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_SHORT_SERVICE`.
+The app uses the following Android capabilities and permissions:
+
+- INTERNET
+- SEND_SMS
+- READ_PHONE_STATE
+- SCHEDULE_EXACT_ALARM
+- RECEIVE_BOOT_COMPLETED
+- WAKE_LOCK
+- REQUEST_IGNORE_BATTERY_OPTIMIZATIONS
+- FOREGROUND_SERVICE
+- FOREGROUND_SERVICE_SHORT_SERVICE
 
 ## Testing
+
+Run the test suite with:
 
 ```sh
 npm test
 ```
 
-Runs the Jest suite (database, scheduler, queue processor, template matcher, and component render tests). All suites currently pass; see `docs/PROJECT_REPORT.md` for known application-level issues being tracked separately from test health.
+## Notes and known issues
 
-## Known issues
+The project documentation currently notes a few important caveats:
 
-See **Section 19 (Known Issues and Risks)** of `docs/PROJECT_REPORT.md` for the current, prioritized list — including WhatsApp auto-send payload handling, queue-claim atomicity, multipart SMS result aggregation, and timezone edge cases around alarm scheduling.
+- WhatsApp auto-send still needs further refinement for production use
+- multipart SMS result handling may be inconsistent
+- alarm timing around timezone and daylight-saving transitions still needs attention
+- production logging should be sanitized to avoid exposing personal data
 
----
+## Additional documentation
 
-Bootstrapped using [`@react-native-community/cli`](https://github.com/react-native-community/cli).
+For the full architecture overview, implementation notes, and current audit status, see:
 
-# Getting Started
-
-> **Note**: Make sure you have completed the [Set Up Your Environment](https://reactnative.dev/docs/set-up-your-environment) guide before proceeding.
-
-## Step 1: Start Metro
-
-First, you will need to run **Metro**, the JavaScript build tool for React Native.
-
-To start the Metro dev server, run the following command from the root of your React Native project:
-
-```sh
-# Using npm
-npm start
-
-# OR using Yarn
-yarn start
-```
-
-## Step 2: Build and run your app
-
-With Metro running, open a new terminal window/pane from the root of your React Native project, and use one of the following commands to build and run your Android or iOS app:
-
-### Android
-
-```sh
-# Using npm
-npm run android
-
-# OR using Yarn
-yarn android
-```
-
-### iOS
-
-For iOS, remember to install CocoaPods dependencies (this only needs to be run on first clone or after updating native deps).
-
-The first time you create a new project, run the Ruby bundler to install CocoaPods itself:
-
-```sh
-bundle install
-```
-
-Then, and every time you update your native dependencies, run:
-
-```sh
-bundle exec pod install
-```
-
-For more information, please visit [CocoaPods Getting Started guide](https://guides.cocoapods.org/using/getting-started.html).
-
-```sh
-# Using npm
-npm run ios
-
-# OR using Yarn
-yarn ios
-```
-
-If everything is set up correctly, you should see your new app running in the Android Emulator, iOS Simulator, or your connected device.
-
-This is one way to run your app — you can also build it directly from Android Studio or Xcode.
-
-## Step 3: Modify your app
-
-Now that you have successfully run the app, let's make changes!
-
-Open `App.tsx` in your text editor of choice and make some changes. When you save, your app will automatically update and reflect these changes — this is powered by [Fast Refresh](https://reactnative.dev/docs/fast-refresh).
-
-When you want to forcefully reload, for example to reset the state of your app, you can perform a full reload:
-
-- **Android**: Press the <kbd>R</kbd> key twice or select **"Reload"** from the **Dev Menu**, accessed via <kbd>Ctrl</kbd> + <kbd>M</kbd> (Windows/Linux) or <kbd>Cmd ⌘</kbd> + <kbd>M</kbd> (macOS).
-- **iOS**: Press <kbd>R</kbd> in iOS Simulator.
-
-## Congratulations! :tada:
-
-You've successfully run and modified your React Native App. :partying_face:
-
-### Now what?
-
-- If you want to add this new React Native code to an existing application, check out the [Integration guide](https://reactnative.dev/docs/integration-with-existing-apps).
-- If you're curious to learn more about React Native, check out the [docs](https://reactnative.dev/docs/getting-started).
-
-# Troubleshooting
-
-If you're having issues getting the above steps to work, see the [Troubleshooting](https://reactnative.dev/docs/troubleshooting) page.
-
-# Learn More
-
-To learn more about React Native, take a look at the following resources:
-
-- [React Native Website](https://reactnative.dev) - learn more about React Native.
-- [Getting Started](https://reactnative.dev/docs/environment-setup) - an **overview** of React Native and how setup your environment.
-- [Learn the Basics](https://reactnative.dev/docs/getting-started) - a **guided tour** of the React Native **basics**.
-- [Blog](https://reactnative.dev/blog) - read the latest official React Native **Blog** posts.
-- [`@facebook/react-native`](https://github.com/facebook/react-native) - the Open Source; GitHub **repository** for React Native.
+- [docs/PROJECT_REPORT.md](docs/PROJECT_REPORT.md)
