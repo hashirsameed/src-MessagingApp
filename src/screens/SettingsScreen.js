@@ -6,10 +6,11 @@ import {
 import { useFocusEffect } from '@react-navigation/native';
 import { getDefaultPlatform, setDefaultPlatform } from '../database/settingsDB';
 import { getAllPlatforms, togglePlatformEnabled, seedDefaultPlatforms } from '../database/platformDB';
-import { getAllRateLimits, setRateLimit, clearRateLimit } from '../database/rateLimitDB';
+import { getAllRateLimits, setRateLimit, clearRateLimit, getAllRateLimitTiers, setRateLimitTier, deleteRateLimitTier } from '../database/rateLimitDB';
 import { handleError, showError, showSuccess, ErrorMessages } from '../utils/errorHandler';
 import { runExpiryCheck } from '../utils/scheduler';
 import { hasWhatsAppCredentials } from '../utils/whatsappService';
+import { hasBulkSmsCredentials } from '../utils/bulkSmsService';
 import { requestSmsPermission } from '../platforms/localTextAdapter';
 import { canScheduleExactAlarms, cancelAlarmsForPlatform, rescheduleAlarmsForPlatform } from '../utils/alarmScheduler';
 import ModernToggle from '../components/ModernToggle';
@@ -29,7 +30,10 @@ export default function SettingsScreen({ navigation }) {
   const [defaultPlatform, setDefaultPlatformState] = useState(null);
   const [runningCheck, setRunningCheck]             = useState(false);
   const [waConfigured, setWaConfigured]             = useState(false);
+  const [bulkSmsConfigured, setBulkSmsConfigured]   = useState(false);
   const [rateLimitDrafts, setRateLimitDrafts]       = useState({}); // platformId -> { count, hours, minutes }
+  const [tiersByPlatform, setTiersByPlatform]       = useState({}); // platformId -> [{ windowMinutes, limitCount }]
+  const [newTierDrafts, setNewTierDrafts]           = useState({}); // platformId -> { count, hours, minutes }
   const [exactAlarmGranted, setExactAlarmGranted]   = useState(true);
   const [batteryExempt, setBatteryExempt]           = useState(true);
   const [smsGranted, setSmsGranted]                 = useState(true);
@@ -56,10 +60,15 @@ export default function SettingsScreen({ navigation }) {
         };
       });
       setRateLimitDrafts(drafts);
+      setTiersByPlatform(getAllRateLimitTiers());
       setPlatforms(getAllPlatforms());
       setDevModeState(isDevModeOn());
-      const configured = await hasWhatsAppCredentials();
+      const [configured, bulkConfigured] = await Promise.all([
+        hasWhatsAppCredentials(),
+        hasBulkSmsCredentials(),
+      ]);
       setWaConfigured(configured);
+      setBulkSmsConfigured(bulkConfigured);
 
       // Re-check every time this screen is focused, not just at app cold
       // start — the user can revoke either permission from system Settings
@@ -190,6 +199,75 @@ export default function SettingsScreen({ navigation }) {
     }
   };
 
+  // ── Default rate limit tiers (DB-driven, editable — e.g. SMS's
+  // 150/15min + 250/1hr + 750/24hr). Multiple tiers can coexist per
+  // platform; ALL must hold simultaneously for a send to be allowed. Only
+  // used when the platform has no Custom Override set above (see
+  // queueUtils.resolveRateLimits).
+  const getNewTierDraft = (platformId) =>
+    newTierDrafts[platformId] ?? { count: '', hours: '', minutes: '' };
+
+  const updateNewTierDraft = (platformId, field, value) => {
+    setNewTierDrafts((prev) => ({
+      ...prev,
+      [platformId]: { ...getNewTierDraft(platformId), [field]: value },
+    }));
+  };
+
+  const handleAddTier = (platformId, platformName) => {
+    const draft = getNewTierDraft(platformId);
+    const count = parseInt(draft.count, 10);
+    const hours = parseInt(draft.hours || '0', 10);
+    const minutes = parseInt(draft.minutes || '0', 10);
+    const windowMinutes = (isNaN(hours) ? 0 : hours) * 60 + (isNaN(minutes) ? 0 : minutes);
+
+    if (isNaN(count) || count <= 0) {
+      showError('Error', 'Enter a valid message count greater than 0.');
+      return;
+    }
+    if (windowMinutes <= 0) {
+      showError('Error', 'Set a time window greater than 0 (hours and/or minutes).');
+      return;
+    }
+    try {
+      const ok = setRateLimitTier(platformId, windowMinutes, count);
+      if (!ok) { showError('Error', ErrorMessages.DB_WRITE); return; }
+      setTiersByPlatform((prev) => {
+        const existing = (prev[platformId] ?? []).filter((t) => t.windowMinutes !== windowMinutes);
+        const next = [...existing, { windowMinutes, limitCount: count }].sort((a, b) => a.windowMinutes - b.windowMinutes);
+        return { ...prev, [platformId]: next };
+      });
+      setNewTierDrafts((prev) => ({ ...prev, [platformId]: { count: '', hours: '', minutes: '' } }));
+      showSuccess('Tier Saved', `${platformName}: max ${count} messages per ${formatWindow(windowMinutes)}.`);
+    } catch (error) {
+      handleError(error, 'SettingsScreen.handleAddTier');
+      showError('Error', ErrorMessages.DB_WRITE);
+    }
+  };
+
+  const handleDeleteTier = (platformId, windowMinutes, platformName) => {
+    try {
+      const ok = deleteRateLimitTier(platformId, windowMinutes);
+      if (!ok) { showError('Error', ErrorMessages.DB_WRITE); return; }
+      setTiersByPlatform((prev) => ({
+        ...prev,
+        [platformId]: (prev[platformId] ?? []).filter((t) => t.windowMinutes !== windowMinutes),
+      }));
+      showSuccess('Tier Removed', `${platformName}'s ${formatWindow(windowMinutes)} tier was removed.`);
+    } catch (error) {
+      handleError(error, 'SettingsScreen.handleDeleteTier');
+      showError('Error', ErrorMessages.DB_WRITE);
+    }
+  };
+
+  const formatWindow = (windowMinutes) => {
+    const hours = Math.floor(windowMinutes / 60);
+    const minutes = windowMinutes % 60;
+    if (hours > 0 && minutes > 0) return `${hours}h ${minutes}m`;
+    if (hours > 0) return `${hours}h`;
+    return `${minutes}m`;
+  };
+
   const handlePlatformToggle = async (platform, value) => {
     try {
       const ok = togglePlatformEnabled(platform.id, value);
@@ -281,8 +359,11 @@ export default function SettingsScreen({ navigation }) {
         const isDefault  = defaultPlatform === platform.id;
         const isEnabled  = platform.is_enabled === 1;
         const isWhatsApp = platform.platform_type === 'managed_remote';
+        const isBulkSms  = platform.platform_type === 'bulk_remote';
         const draft = getDraft(platform.id);
         const hasSavedLimit = !!rateLimitDrafts[platform.id]?.count;
+        const tiers = tiersByPlatform[platform.id] ?? [];
+        const newTierDraft = getNewTierDraft(platform.id);
 
         return (
           <View key={platform.id} style={styles.accCard}>
@@ -319,12 +400,79 @@ export default function SettingsScreen({ navigation }) {
                   </Text>
                 )}
 
+                {/* ── Default Rate Limit Tiers — DB-driven, editable, ALL
+                    tiers must hold simultaneously (e.g. SMS ships with
+                    150/15min + 250/1hr + 750/24hr). Ignored entirely if a
+                    Custom Override is set below. ── */}
                 <View style={styles.accSection}>
-                  <Text style={styles.accSectionLabel}>Rate Limit</Text>
+                  <Text style={styles.accSectionLabel}>Default Rate Limit Tiers</Text>
                   <Text style={styles.accSectionHint}>
-                    Max messages sent per rolling time window you choose. Extra messages wait in
-                    the queue and send automatically once the window allows — nothing is dropped.
-                    Leave empty for unlimited.
+                    Every tier below must hold at once — add as many as you need. These are
+                    ignored if a Custom Override is set further down.
+                  </Text>
+
+                  {tiers.length > 0 && (
+                    <View style={styles.tierList}>
+                      {tiers.map((tier) => (
+                        <View key={tier.windowMinutes} style={styles.tierRow}>
+                          <Text style={styles.tierRowText}>
+                            {tier.limitCount} per {formatWindow(tier.windowMinutes)}
+                          </Text>
+                          <TouchableOpacity
+                            onPress={() => handleDeleteTier(platform.id, tier.windowMinutes, platform.name)}
+                            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                            <Text style={styles.tierRemoveX}>✕</Text>
+                          </TouchableOpacity>
+                        </View>
+                      ))}
+                    </View>
+                  )}
+
+                  <View style={styles.rateLimitRow}>
+                    <TextInput
+                      style={styles.rateLimitCountInput}
+                      keyboardType="numeric"
+                      value={newTierDraft.count}
+                      onChangeText={(v) => updateNewTierDraft(platform.id, 'count', v.replace(/[^0-9]/g, ''))}
+                      placeholder="e.g. 150"
+                      placeholderTextColor="#BDBDBD"
+                    />
+                    <Text style={styles.rateLimitPerText}>per</Text>
+                    <TextInput
+                      style={styles.rateLimitTimeInput}
+                      keyboardType="numeric"
+                      value={newTierDraft.hours}
+                      onChangeText={(v) => updateNewTierDraft(platform.id, 'hours', v.replace(/[^0-9]/g, ''))}
+                      placeholder="0"
+                      placeholderTextColor="#BDBDBD"
+                    />
+                    <Text style={styles.rateLimitUnitText}>h</Text>
+                    <TextInput
+                      style={styles.rateLimitTimeInput}
+                      keyboardType="numeric"
+                      value={newTierDraft.minutes}
+                      onChangeText={(v) => updateNewTierDraft(platform.id, 'minutes', v.replace(/[^0-9]/g, ''))}
+                      placeholder="15"
+                      placeholderTextColor="#BDBDBD"
+                    />
+                    <Text style={styles.rateLimitUnitText}>m</Text>
+                  </View>
+                  <View style={styles.rateLimitBtnRow}>
+                    <TouchableOpacity
+                      onPress={() => handleAddTier(platform.id, platform.name)}
+                      style={styles.smsLimitSaveBtn}
+                      activeOpacity={0.8}>
+                      <Text style={styles.smsLimitSaveBtnText}>Add Tier</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+
+                <View style={styles.accSection}>
+                  <Text style={styles.accSectionLabel}>Custom Override</Text>
+                  <Text style={styles.accSectionHint}>
+                    Set one specific limit that REPLACES all the default tiers above entirely —
+                    typically used when a Bulk SMS API is connected and its provider has its own
+                    limit. Leave empty to use the default tiers instead.
                   </Text>
                   <View style={styles.rateLimitRow}>
                     <TextInput
@@ -382,6 +530,21 @@ export default function SettingsScreen({ navigation }) {
                       <Text style={styles.accRowLabel}>Configuration</Text>
                       <Text style={[styles.waStatus, waConfigured ? styles.waStatusOk : styles.waStatusOff]}>
                         {waConfigured ? '✅ Configured' : '⚠️ Not configured'}
+                      </Text>
+                    </View>
+                    <Text style={styles.chevron}>›</Text>
+                  </TouchableOpacity>
+                )}
+
+                {isBulkSms && (
+                  <TouchableOpacity
+                    style={styles.accRow}
+                    onPress={() => navigation.navigate('BulkSmsConfig')}
+                    activeOpacity={0.7}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.accRowLabel}>Configuration</Text>
+                      <Text style={[styles.waStatus, bulkSmsConfigured ? styles.waStatusOk : styles.waStatusOff]}>
+                        {bulkSmsConfigured ? '✅ Configured' : '⚠️ Not configured'}
                       </Text>
                     </View>
                     <Text style={styles.chevron}>›</Text>
@@ -689,6 +852,15 @@ const styles = StyleSheet.create({
     borderRadius: 9, borderWidth: 1, borderColor: '#FFE0E0',
   },
   rateLimitClearBtnText: { color: '#D32F2F', fontWeight: '600', fontSize: 12.5 },
+
+  tierList: { marginBottom: 10, gap: 6 },
+  tierRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    backgroundColor: '#F8F9FA', borderRadius: 9, borderWidth: 1, borderColor: '#EEEEEE',
+    paddingVertical: 8, paddingHorizontal: 11,
+  },
+  tierRowText: { fontSize: 13, fontWeight: '600', color: '#1A1A2E' },
+  tierRemoveX: { fontSize: 13, color: '#D32F2F', fontWeight: '700', paddingHorizontal: 4 },
 
   smsLimitSaveBtn: {
     backgroundColor: '#1A1A2E', paddingHorizontal: 16,

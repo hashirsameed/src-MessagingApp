@@ -1,5 +1,6 @@
 import { NativeModules, Platform } from 'react-native';
-import { getRateLimit, getWindowFreeAtMs } from '../database/rateLimitDB';
+import { getWindowFreeAtMs } from '../database/rateLimitDB';
+import { resolveRateLimits } from './queueUtils';
 import { handleError } from './errorHandler';
 import { debugTrace, debugTraceError, generateTraceId } from './debugTrace';
 
@@ -55,8 +56,30 @@ export const getRetryRequestCode = (platformId) => {
  *   better than our local "evenly spaced sends" assumption — and applies
  *   even when no local admin rate-limit row exists for this platform, since
  *   Meta's own limit is the real constraint in that case.
+ * @param {Set<number>|null} [limitedWindows] Optional — the set of
+ *   windowMinutes values (e.g. {15, 60}) that were ACTUALLY at/over their
+ *   cap when this platform's lane broke, as determined by isRateLimited()'s
+ *   per-tier `limited` flag (see queueProcessor.js).
+ *
+ *   FIX — WHY THIS MATTERS: previously, whenever a platform got rate
+ *   limited, this function computed getWindowFreeAtMs() for EVERY
+ *   configured tier (e.g. 15min, 1hr, AND 24hr for SMS) and took the
+ *   latest (max) of all three — even when only the 15-min tier was
+ *   actually the thing blocking sends, with the 1hr/24hr tiers nowhere
+ *   near their own caps. That meant the retry alarm could fire up to ~24
+ *   hours later than necessary for a lane that only needed ~15 minutes to
+ *   clear, leaving the app idle far longer than the real constraint
+ *   required.
+ *
+ *   Now, when limitedWindows is provided and non-empty, only THOSE tiers'
+ *   free-at times are considered — the retry fires as soon as the
+ *   genuinely-blocking tier(s) clear, regardless of how far the others
+ *   are from their own caps. When limitedWindows is omitted/null/empty
+ *   (e.g. the provider-side WhatsApp 429 path, which isn't driven by our
+ *   own tier math at all), behavior falls back to considering every
+ *   configured tier, same as before.
  */
-export const scheduleRateLimitRetryAlarm = async (platformId, explicitRetryAfterMs = null) => {
+export const scheduleRateLimitRetryAlarm = async (platformId, explicitRetryAfterMs = null, limitedWindows = null) => {
   if (!isAlarmModuleAvailable()) return 'SKIPPED_NATIVE_UNAVAILABLE';
 
   const traceId = generateTraceId('rateLimitRetry');
@@ -69,13 +92,42 @@ export const scheduleRateLimitRetryAlarm = async (platformId, explicitRetryAfter
       source = 'explicit_override';
       debugTrace('RateLimitRetryUsingExplicitOverride', { traceId, platformId, explicitRetryAfterMs });
     } else {
-      const rateLimit = getRateLimit(platformId);
-      if (!rateLimit) {
+      const rateLimits = resolveRateLimits(platformId);
+      if (rateLimits.length === 0) {
         // No configured limit and no explicit override — nothing to retry against.
         debugTrace('RateLimitRetrySkip', { traceId, platformId, reason: 'no_rate_limit_configured' });
         return 'SKIPPED_NO_LIMIT';
       }
-      retryAtMs = getWindowFreeAtMs(platformId, rateLimit.windowMinutes);
+
+      // FIX — only consider tiers that are ACTUALLY at/over their cap right
+      // now. A tier that still has headroom isn't what's blocking the next
+      // send, so its (potentially much later) free-at time shouldn't drag
+      // the retry out. Falls back to every configured tier when the caller
+      // doesn't know which specific tier(s) tripped (limitedWindows is
+      // null/empty) — this keeps the old, safer-but-slower behavior for
+      // any caller that hasn't been updated to pass it yet.
+      const relevantTiers = (limitedWindows && limitedWindows.size > 0)
+        ? rateLimits.filter((t) => limitedWindows.has(t.windowMinutes))
+        : rateLimits;
+
+      debugTrace('RateLimitRetryTierSelection', {
+        traceId, platformId,
+        consideredTiers: relevantTiers.map((t) => `${t.windowMinutes}min`).join(',') || 'none',
+        allConfiguredTiers: rateLimits.map((t) => `${t.windowMinutes}min`).join(','),
+        usedFallbackToAllTiers: !(limitedWindows && limitedWindows.size > 0),
+      });
+
+      // Every active RELEVANT tier must be clear before a send can go
+      // through again, so the true retry time is the LATEST (max) of each
+      // relevant tier's own free-at estimate — the slowest of the actually-
+      // blocking tiers is what's really gating the next send. A tier with
+      // no SENT rows in its window returns null (nothing to wait on for
+      // that tier) and is ignored.
+      retryAtMs = relevantTiers.reduce((latest, tier) => {
+        const tierFreeAtMs = getWindowFreeAtMs(platformId, tier.windowMinutes);
+        if (tierFreeAtMs === null) return latest;
+        return latest === null ? tierFreeAtMs : Math.max(latest, tierFreeAtMs);
+      }, null);
     }
 
     if (retryAtMs === null || retryAtMs <= Date.now()) {

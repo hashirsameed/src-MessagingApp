@@ -4,6 +4,7 @@
  * Keyed by `platform_type` (see platforms.platform_type column, db.js):
  *   - 'local_text'     → SMS, Email, Gmail, any custom Linking/url_scheme platform
  *   - 'managed_remote' → WhatsApp (Meta Cloud API, approved templates)
+ *   - 'bulk_remote'    → Bulk SMS API (generic gateway — see bulkSmsAdapter.js)
  *
  * Each adapter implements the same shape:
  *   {
@@ -21,6 +22,7 @@
 export const registry = {
   local_text: null,
   managed_remote: null,
+  bulk_remote: null,
 };
 
 export const registerAdapter = (platformType, adapter) => {

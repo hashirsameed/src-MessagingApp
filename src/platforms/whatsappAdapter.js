@@ -25,7 +25,7 @@ const isRateLimitedResponse = (result) => {
 
 /**
  * dispatch — handles platform_type = 'managed_remote' (WhatsApp / Meta Cloud API).
- * ctx = { waConfigured, traceContext, template }
+ * ctx = { waConfigured, traceContext, template, dryRun }
  * `template.meta_template_name`/`meta_template_language` (set when the
  * schedule was created — see CreateTemplateScreen) tell sendWhatsAppMessage
  * which specific APPROVED Meta template to use; contact.name fills its
@@ -41,9 +41,17 @@ const isRateLimitedResponse = (result) => {
  * The rate-limited case is intentionally NOT treated as a permanent failure
  * — queueProcessor reverts it to PENDING and arms a retry-alarm, same
  * pattern as the local SMS rate limit, instead of marking it FAILED forever.
+ *
+ * DRY RUN — when ctx.dryRun is true, the `waConfigured` check above still
+ * runs for real (so a dry-run batch can still exercise the
+ * WHATSAPP_NOT_CONFIGURED failure path), but the actual Meta Cloud API
+ * `fetch()` call inside sendWhatsAppMessage is skipped entirely — a
+ * synthetic 'sent' result is returned instead. This is the only thing
+ * standing between a Testing Lab bulk-send and a real WhatsApp message
+ * going out to a real number.
  */
 export const dispatch = async (platform, contact, message, ctx = {}) => {
-  const { waConfigured = false, traceContext = {}, template = null } = ctx;
+  const { waConfigured = false, traceContext = {}, template = null, dryRun = false } = ctx;
 
   if (!waConfigured) {
     debugTrace('DispatchItemExit', {
@@ -51,6 +59,13 @@ export const dispatch = async (platform, contact, message, ctx = {}) => {
       result: 'failed_permanent:WHATSAPP_NOT_CONFIGURED',
     });
     return { status: 'failed_permanent', reason: 'WHATSAPP_NOT_CONFIGURED' };
+  }
+
+  if (dryRun) {
+    debugTrace('DispatchItemExit', {
+      ...traceContext, platformId: 'whatsapp', outcome: 'sent', result: 'DRY_RUN_SIMULATED_SENT',
+    });
+    return { status: 'sent' };
   }
 
   const phone = formatPhone(contact.phone_number ?? '');

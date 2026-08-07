@@ -15,6 +15,7 @@ import PlatformManagerScreen from './src/screens/PlatformManagerScreen';
 import QueueScreen from './src/screens/QueueScreen';
 import SettingsScreen from './src/screens/SettingsScreen';
 import WhatsAppConfigScreen from './src/screens/WhatsAppConfigScreen';
+import BulkSmsConfigScreen from './src/screens/BulkSmsConfigScreen';
 import WhatsAppTemplatesScreen from './src/screens/WhatsAppTemplatesScreen';
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -351,6 +352,12 @@ export default function App() {
           name="WhatsAppConfig"
           component={WhatsAppConfigScreen}
           options={{ title: 'WhatsApp API Setup' }}
+        />
+
+        <Stack.Screen
+          name="BulkSmsConfig"
+          component={BulkSmsConfigScreen}
+          options={{ title: 'Bulk SMS API Setup' }}
         />
 
         <Stack.Screen

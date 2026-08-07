@@ -114,12 +114,20 @@ const sendViaLinking = async (platform, contact, message, traceContext = {}) => 
 
 /**
  * dispatch — handles platform_type = 'local_text' (sms, email, gmail, custom).
- * ctx = { smsPermissionGranted, traceContext }
+ * ctx = { smsPermissionGranted, traceContext, dryRun }
  * Returns: 'sent' | 'opened' | 'failed_<REASON>' — same result vocabulary
  * queueProcessor already understands, so Step 5 is a drop-in swap.
+ *
+ * DRY RUN — when ctx.dryRun is true, everything up to (and including)
+ * permission validation still runs for real (so a dry-run batch can still
+ * exercise the NO_SMS_PERMISSION failure path), but the actual native SIM
+ * call (`SmsModule.sendSms`) and the `Linking.openURL` fallback are both
+ * skipped — a synthetic outcome is returned instead. This is the ONLY
+ * thing standing between a Testing Lab bulk-send and a real SMS/intent
+ * going out, so don't remove this check without very good reason.
  */
 export const dispatch = async (platform, contact, message, ctx = {}) => {
-  const { smsPermissionGranted = false, traceContext = {} } = ctx;
+  const { smsPermissionGranted = false, traceContext = {}, dryRun = false } = ctx;
 
   if (platform.id === 'sms') {
     if (Platform.OS === 'android') {
@@ -128,6 +136,13 @@ export const dispatch = async (platform, contact, message, ctx = {}) => {
           ...traceContext, platformId: 'sms', exitReason: 'no_sms_permission', result: 'failed_NO_SMS_PERMISSION',
         });
         return 'failed_NO_SMS_PERMISSION';
+      }
+
+      if (dryRun) {
+        debugTrace('DispatchItemExit', {
+          ...traceContext, platformId: 'sms', outcome: 'sent', result: 'DRY_RUN_SIMULATED_SENT',
+        });
+        return 'sent';
       }
 
       const { sent, reason } = await sendNativeSms(contact.phone_number, message, traceContext);
@@ -149,6 +164,11 @@ export const dispatch = async (platform, contact, message, ctx = {}) => {
       return failResult;
     }
 
+    if (dryRun) {
+      debugTrace('DispatchItemExit', { ...traceContext, platformId: 'sms', outcome: 'opened', result: 'DRY_RUN_SIMULATED_OPENED' });
+      return 'opened';
+    }
+
     const opened = await sendViaLinking(platform, contact, message, traceContext);
     const result = opened ? 'opened' : 'failed_SMS_PLATFORM_UNAVAILABLE';
     debugTrace('DispatchItemExit', { ...traceContext, platformId: 'sms', outcome: opened ? 'opened' : 'failed', result });
@@ -156,6 +176,11 @@ export const dispatch = async (platform, contact, message, ctx = {}) => {
   }
 
   // Email / Gmail / any custom url_scheme platform
+  if (dryRun) {
+    debugTrace('DispatchItemExit', { ...traceContext, platformId: platform.id, outcome: 'opened', result: 'DRY_RUN_SIMULATED_OPENED' });
+    return 'opened';
+  }
+
   const opened = await sendViaLinking(platform, contact, message, traceContext);
   if (opened) {
     debugTrace('DispatchItemExit', { ...traceContext, platformId: platform.id, outcome: 'opened' });

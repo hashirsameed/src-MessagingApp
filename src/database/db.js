@@ -46,19 +46,46 @@ const ensureSchema = (db) => {
     name TEXT NOT NULL, 
     icon TEXT NOT NULL, 
     url_scheme TEXT NOT NULL,
-    platform_type TEXT CHECK(platform_type IN ('local_text','managed_remote')) NOT NULL DEFAULT 'local_text',
+    platform_type TEXT CHECK(platform_type IN ('local_text','managed_remote','bulk_remote')) NOT NULL DEFAULT 'local_text',
     is_enabled INTEGER NOT NULL CHECK(is_enabled IN (0,1)) DEFAULT 1,
     created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
   );`);
   db.execute(`INSERT OR IGNORE INTO platforms (id,name,icon,url_scheme,platform_type) VALUES ('sms','SMS','💬','sms:{phone}?body={message}','local_text');`);
   db.execute(`INSERT OR IGNORE INTO platforms (id,name,icon,url_scheme,platform_type) VALUES ('whatsapp','WhatsApp','🟢','','managed_remote');`);
+  // Bulk SMS API — separate platform from device 'sms' (see bulkSmsAdapter.js).
+  // Seeded DISABLED so it never appears as a usable send target until the
+  // user actually connects a provider from Settings — same convention as
+  // WhatsApp requiring configuration first, just enforced via is_enabled
+  // here since bulk SMS has no fixed provider to check credentials against
+  // at seed time.
+  db.execute(`INSERT OR IGNORE INTO platforms (id,name,icon,url_scheme,platform_type,is_enabled) VALUES ('sms_bulk','Bulk SMS','📨','','bulk_remote',0);`);
 
-  // 3. platform_rate_limits (Independent module)
+  // 3. platform_rate_limits — single CUSTOM OVERRIDE tier per platform.
+  // When a row exists here for a platform, it REPLACES the default tiers
+  // in platform_rate_limit_tiers entirely (this is the bulk-SMS-API path,
+  // or any platform where the user wants one specific number instead of
+  // the default three-tier scheme).
   db.execute(`CREATE TABLE IF NOT EXISTS platform_rate_limits (
     platform_id TEXT NOT NULL PRIMARY KEY REFERENCES platforms(id) ON DELETE CASCADE,
     limit_count INTEGER NOT NULL, 
     window_minutes INTEGER NOT NULL
   );`);
+
+  // 3b. platform_rate_limit_tiers — DEFAULT, DB-DRIVEN, EDITABLE tiers.
+  // A platform can have multiple simultaneous tiers (e.g. SMS: 150/15min,
+  // 250/1hr, 750/24hr — ALL must hold at once, AND logic, strictly under
+  // each limit). Seeded below with INSERT OR IGNORE so it's a starting
+  // value only — fully editable afterwards from Settings, never
+  // hardcoded/read back into code.
+  db.execute(`CREATE TABLE IF NOT EXISTS platform_rate_limit_tiers (
+    platform_id TEXT NOT NULL REFERENCES platforms(id) ON DELETE CASCADE,
+    window_minutes INTEGER NOT NULL,
+    limit_count INTEGER NOT NULL,
+    PRIMARY KEY (platform_id, window_minutes)
+  );`);
+  db.execute(`INSERT OR IGNORE INTO platform_rate_limit_tiers (platform_id, window_minutes, limit_count) VALUES ('sms', 15, 150);`);
+  db.execute(`INSERT OR IGNORE INTO platform_rate_limit_tiers (platform_id, window_minutes, limit_count) VALUES ('sms', 60, 250);`);
+  db.execute(`INSERT OR IGNORE INTO platform_rate_limit_tiers (platform_id, window_minutes, limit_count) VALUES ('sms', 1440, 750);`);
 
   // 4. templates
   db.execute(`CREATE TABLE IF NOT EXISTS templates (
