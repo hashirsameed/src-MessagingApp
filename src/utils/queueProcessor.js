@@ -91,7 +91,10 @@ const SAFETY_FLOOR_MS = { sms: 2000, whatsapp: 800 };
 // ─────────────────────────────────────────────────────────────────────────────
 const THROTTLE_CURVE_POWER = 4;
 
-const computeMinGapMs = (platformId, rateLimits, tierUsage = []) => {
+// Exported (was module-private) solely so DevTestScreen's curve-validation
+// tooling can call the EXACT production pacing formula against real or
+// hypothetical tier-usage points — no behavior change, just visibility.
+export const computeMinGapMs = (platformId, rateLimits, tierUsage = []) => {
   const tiers = rateLimits ?? [];
   if (tiers.length === 0) return DEFAULT_GAP_MS[platformId] ?? DEFAULT_FALLBACK_GAP_MS;
 

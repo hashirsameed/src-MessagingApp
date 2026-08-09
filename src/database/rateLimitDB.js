@@ -119,6 +119,53 @@ export const getAllRateLimitTiers = () => {
 };
 
 /**
+ * Validates that a set of tiers is internally consistent: any tier with a
+ * LARGER window must have a limitCount STRICTLY GREATER than every tier
+ * with a smaller window. A longer rolling window always contains every
+ * shorter window's sends as a subset (e.g. every send counted in a 15-min
+ * window is also counted in the 1-hr window that contains it), so a
+ * longer window's cap can never be lower than — or equal to — a shorter
+ * window's cap without being a contradiction.
+ *
+ * General-purpose: works for any number of tiers, not hardcoded to
+ * 15min/1hr/24hr, so a custom tier (6hr, 12hr, etc.) is validated the
+ * same way automatically. Sorts by window first, then only needs to
+ * compare each tier against its immediate neighbor — that single pass
+ * transitively covers every pair (15min<1hr, 1hr<24hr, AND 15min<24hr).
+ *
+ * @param {Array<{ windowMinutes: number, limitCount: number }>} tiers
+ * @returns {{ valid: true } | { valid: false, error: string }}
+ */
+export const validateTierMonotonicity = (tiers) => {
+  if (!Array.isArray(tiers) || tiers.length < 2) {
+    return { valid: true }; // nothing to compare against
+  }
+
+  const sorted = [...tiers].sort((a, b) => a.windowMinutes - b.windowMinutes);
+
+  for (let i = 1; i < sorted.length; i++) {
+    const smaller = sorted[i - 1];
+    const larger = sorted[i];
+
+    if (smaller.windowMinutes === larger.windowMinutes) {
+      return {
+        valid: false,
+        error: `Two tiers can't share the same ${smaller.windowMinutes}-minute window.`,
+      };
+    }
+
+    if (larger.limitCount <= smaller.limitCount) {
+      return {
+        valid: false,
+        error: `The ${larger.windowMinutes}-minute tier's limit (${larger.limitCount}) must be greater than the ${smaller.windowMinutes}-minute tier's limit (${smaller.limitCount}) — a longer window always contains the shorter one, so its cap can't be lower or equal.`,
+      };
+    }
+  }
+
+  return { valid: true };
+};
+
+/**
  * Upsert one tier for a platform. Same (platformId, windowMinutes) pair
  * updates the existing tier's count instead of duplicating it.
  * @param {string} platformId

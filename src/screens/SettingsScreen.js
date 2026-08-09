@@ -6,7 +6,7 @@ import {
 import { useFocusEffect } from '@react-navigation/native';
 import { getDefaultPlatform, setDefaultPlatform } from '../database/settingsDB';
 import { getAllPlatforms, togglePlatformEnabled, seedDefaultPlatforms } from '../database/platformDB';
-import { getAllRateLimits, setRateLimit, clearRateLimit, getAllRateLimitTiers, setRateLimitTier, deleteRateLimitTier } from '../database/rateLimitDB';
+import { getAllRateLimits, setRateLimit, clearRateLimit, getAllRateLimitTiers, setRateLimitTier, deleteRateLimitTier, validateTierMonotonicity } from '../database/rateLimitDB';
 import { handleError, showError, showSuccess, ErrorMessages } from '../utils/errorHandler';
 import { runExpiryCheck } from '../utils/scheduler';
 import { hasWhatsAppCredentials } from '../utils/whatsappService';
@@ -229,6 +229,26 @@ export default function SettingsScreen({ navigation }) {
       showError('Error', 'Set a time window greater than 0 (hours and/or minutes).');
       return;
     }
+
+    // Build the tier set this platform WOULD have after this add — same
+    // replace-existing-window-or-append logic as the actual save below —
+    // and validate the whole set together before writing anything. This
+    // is the general check, not hardcoded to any specific pair: it catches
+    // a new 1hr tier being lower than an existing 15min tier, a new 15min
+    // tier being raised above an existing 1hr tier, a new 6hr tier landing
+    // between two others incorrectly, etc. — any window/count combination
+    // that would make a longer window's cap <= a shorter window's cap.
+    const existingTiers = tiersByPlatform[platformId] ?? [];
+    const candidateTiers = [
+      ...existingTiers.filter((t) => t.windowMinutes !== windowMinutes),
+      { windowMinutes, limitCount: count },
+    ];
+    const validation = validateTierMonotonicity(candidateTiers);
+    if (!validation.valid) {
+      showError('Invalid Tier', validation.error);
+      return;
+    }
+
     try {
       const ok = setRateLimitTier(platformId, windowMinutes, count);
       if (!ok) { showError('Error', ErrorMessages.DB_WRITE); return; }

@@ -222,8 +222,21 @@ export const getAllQueue = () => {
   }
 };
 
-// Cheap tab-badge counts — 3 COUNT(*) queries instead of loading every
+// Cheap tab-badge counts — 1 GROUP BY query instead of loading every
 // row just to count them client-side.
+//
+// FIX — Total Queued mismatch: this used to zero-initialize only
+// PENDING/SENT/FAILED. Rows sitting in CLAIMED (mid-flight while
+// processQueue holds them, however briefly) or SUPERSEDED (a queue row
+// cancelled out from under it — e.g. its template was deactivated or
+// re-scheduled while it was still PENDING) still exist in message_queue
+// and still came back from this GROUP BY, but any consumer summing only
+// PENDING+SENT+FAILED (see DevTestScreen.js) silently dropped them —
+// Total Queued permanently undercounted the real row count for
+// SUPERSEDED rows (they never transition back out of that status), and
+// dipped during every processing pass while items were CLAIMED. Now every
+// known status is always present in the returned object (0 if absent),
+// so summing Object.values(counts) always equals the true row count.
 export const getQueueCounts = () => {
   try {
     const db = getDB();
@@ -231,12 +244,18 @@ export const getQueueCounts = () => {
       `SELECT status, COUNT(*) as count FROM message_queue GROUP BY status;`,
     );
     const rows = result.rows?._array || [];
-    const counts = { PENDING: 0, SENT: 0, FAILED: 0 };
+    const counts = {
+      [QUEUE_STATUS.PENDING]: 0,
+      [QUEUE_STATUS.CLAIMED]: 0,
+      [QUEUE_STATUS.SENT]: 0,
+      [QUEUE_STATUS.FAILED]: 0,
+      [QUEUE_STATUS.SUPERSEDED]: 0,
+    };
     rows.forEach((r) => { counts[r.status] = r.count; });
     return counts;
   } catch (error) {
     handleError(error, 'getQueueCounts');
-    return { PENDING: 0, SENT: 0, FAILED: 0 };
+    return { PENDING: 0, CLAIMED: 0, SENT: 0, FAILED: 0, SUPERSEDED: 0 };
   }
 };
 
@@ -429,4 +448,3 @@ export const claimSpecificQueueItem = (id, callerId = null) => {
     return null;
   }
 };
-
