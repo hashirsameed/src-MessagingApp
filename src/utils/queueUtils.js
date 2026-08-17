@@ -6,8 +6,7 @@
  * where marked, so they compose cleanly into the two execution paths.
  */
 
-import { countSentInWindow, getRateLimit, getRateLimitTiers } from '../database/rateLimitDB';
-import { getInFlightCount } from './rateLimitReservation';
+import { getRateLimit, getRateLimitTiers } from '../database/rateLimitDB';
 import { markAsSent, markAsFailed, revertToPending } from '../database/messageQueueDB';
 import { debugTrace } from './debugTrace';
 
@@ -44,25 +43,6 @@ export const resolveRateLimits = (platformId) => {
 // for anything that needs it (e.g. the retry alarm). The caller is
 // responsible for reverting items and scheduling a retry alarm.
 // ─────────────────────────────────────────────────────────────────────────────
-export const isRateLimited = (platformId, rateLimits) => {
-  const tiers = rateLimits ?? [];
-  if (tiers.length === 0) return { limited: false, currentSent: 0, tiers: [] };
-
-  let limited = false;
-  let worstCurrentSent = 0;
-  const details = tiers.map((tier) => {
-    const dbSent = countSentInWindow(platformId, tier.windowMinutes);
-    const inFlight = getInFlightCount(platformId, tier.windowMinutes);
-    const currentSent = dbSent + inFlight;
-    const tierLimited = currentSent >= tier.limitCount;
-    if (tierLimited) limited = true;
-    if (currentSent > worstCurrentSent) worstCurrentSent = currentSent;
-    return { windowMinutes: tier.windowMinutes, limitCount: tier.limitCount, currentSent, limited: tierLimited };
-  });
-
-  return { limited, currentSent: worstCurrentSent, tiers: details };
-};
-
 // ─────────────────────────────────────────────────────────────────────────────
 // 2. Validate a queue item against its resolved contact/template/platform.
 //

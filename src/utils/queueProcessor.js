@@ -2,13 +2,21 @@ import { Platform, NativeModules } from 'react-native';
 import {
   claimPendingQueue, markAsSent, markAsFailed, revertToPending,
   revertBatchToPending, getQueueRowById, claimSpecificQueueItem,
+  getPendingCountForPlatform,
 } from '../database/messageQueueDB';
 import { getAllContacts } from '../database/contactDB';
 import { getAllTemplates } from '../database/templateDB';
 import { getAllPlatforms } from '../database/platformDB';
-import { reserveSlot, releaseSlot } from './rateLimitReservation';
-import { isRateLimited, resolveRateLimits, validateQueueItem, normalizeDispatchResult } from './queueUtils';
+import { getSentHistoryForPlatform } from '../database/rateLimitDB';
+import { getMinSendIntervalMs, getRateLimitRecoveryThreshold } from '../database/settingsDB';
+import {
+  reserveSlot, releaseSlot, getInFlightCount,
+  getExecutionContext, recordDispatchStart, recordDispatchCompletion,
+} from './rateLimitReservation';
+import { resolveRateLimits, validateQueueItem, normalizeDispatchResult } from './queueUtils';
+import { calculateNextSafeSendTime, pruneHistory, appendSend } from './rateLimitEngine';
 import { scheduleRateLimitRetryAlarm } from './rateLimitRetryAlarm';
+import { MAX_INLINE_DELAY_MS } from './schedulerConstants';
 import { getDaysUntilExpiry, personalizeMessage } from './templateMatcher';
 import { handleError } from './errorHandler';
 import { debugTrace, debugTraceError, debugTraceDuration, generateTraceId } from './debugTrace';
@@ -16,6 +24,7 @@ import { getAdapter } from '../platforms/registry';
 import { requestSmsPermission } from '../platforms/localTextAdapter';
 import { isConfigured as hasWhatsAppCredentials } from '../platforms/whatsappAdapter';
 import { isConfigured as hasBulkSmsCredentials } from '../platforms/bulkSmsAdapter';
+import { getNow, devDelayMs } from './devClock';
 
 const { AlarmModule } = NativeModules;
 
@@ -44,83 +53,12 @@ export const FIXED_PLATFORMS = [
   { id: 'gmail',    name: 'Gmail',    url_scheme: 'googlegmail://co?to={email}&subject={subject}&body={message}', platform_type: 'local_text' },
 ];
 
-// Fallback flat delay when a platform has no configured rate limit at all
-// (unchanged from the old single-lane behavior).
-const DEFAULT_GAP_MS = { sms: 3500, whatsapp: 1500 };
-const DEFAULT_FALLBACK_GAP_MS = 1500;
-
-// Conservative lower bound on the gap between sends, even if the configured
-// rate limit's math would allow something faster. SMS goes through Android's
-// native telephony stack (SmsManager) — real-device-safe thresholds vary by
-// manufacturer/OS version and aren't independently verified here, so this
-// stays a deliberately conservative, tunable default rather than an
-// aggressive hand-picked number. WhatsApp is a pure network call (Meta Cloud
-// API) — no telephony-stack risk, and Meta does its own burst pacing
-// server-side — so it gets a much smaller floor.
-const SAFETY_FLOOR_MS = { sms: 2000, whatsapp: 800 };
-
-// ─────────────────────────────────────────────────────────────────────────────
-// FIX 2 — Continuous-curve pacing (replaces flat "always-sustained-rate" gap)
-//
-// OLD BEHAVIOR: computeMinGapMs() was called ONCE before the loop, using
-// each tier's full-window-average gap (window / limit) regardless of how
-// much of that tier's budget was actually used. This meant a platform sat
-// at ~115s/message (750/24hr's sustained rate) from the very first send of
-// the day, even with 0 messages sent so far — needlessly slow when there
-// was no real pressure on any tier yet.
-//
-// NEW BEHAVIOR: gap is recomputed before EVERY send, from that moment's
-// actual currentSent/limitCount ratio per tier. Far from a tier's cap, the
-// gap is just the safety floor (fast). As usage approaches that tier's
-// cap, the gap ramps up smoothly toward the tier's full sustained gap —
-// no fixed "zone" cliff-edge, just a continuous curve. THROTTLE_CURVE_POWER
-// controls how "back-loaded" the ramp is: higher values stay flat for
-// longer, then rise sharply only in the last stretch before the cap.
-//
-//   usageRatio = currentSent / limitCount              (0..1)
-//   gap = floor + (sustainedGap - floor) * usageRatio^THROTTLE_CURVE_POWER
-//
-// At power=4: ~20% usage -> gap barely above floor. ~50% -> still mostly
-// floor. ~80%+ -> gap climbs quickly toward the full sustained rate, so by
-// the time isRateLimited()'s hard gate actually blocks (currentSent >=
-// limitCount), pacing has already smoothly decelerated into that wall
-// instead of slamming from floor-speed straight into a hard stop.
-//
-// As before, when multiple tiers are active, the tier demanding the
-// LARGEST gap wins — every tier must be respected simultaneously.
-// ─────────────────────────────────────────────────────────────────────────────
-const THROTTLE_CURVE_POWER = 4;
-
-// Exported (was module-private) solely so DevTestScreen's curve-validation
-// tooling can call the EXACT production pacing formula against real or
-// hypothetical tier-usage points — no behavior change, just visibility.
-export const computeMinGapMs = (platformId, rateLimits, tierUsage = []) => {
-  const tiers = rateLimits ?? [];
-  if (tiers.length === 0) return DEFAULT_GAP_MS[platformId] ?? DEFAULT_FALLBACK_GAP_MS;
-
-  const floor = SAFETY_FLOOR_MS[platformId] ?? 0;
-
-  const tightestGapMs = tiers.reduce((maxGap, tier) => {
-    const usage = tierUsage.find((u) => u.windowMinutes === tier.windowMinutes);
-    const currentSent = usage?.currentSent ?? 0;
-    // Clamp to 1 — isRateLimited() already hard-blocks at/over the cap, so
-    // this only ever needs to describe the approach toward it.
-    const usageRatio = Math.min(1, tier.limitCount > 0 ? currentSent / tier.limitCount : 0);
-
-    const sustainedGapMs = (tier.windowMinutes * 60 * 1000) / tier.limitCount;
-    const dynamicGapMs = floor + (sustainedGapMs - floor) * Math.pow(usageRatio, THROTTLE_CURVE_POWER);
-    return Math.max(maxGap, dynamicGapMs);
-  }, 0);
-
-  return Math.max(floor, tightestGapMs);
-};
-
 // ─────────────────────────────────────────────────────────────────────────────
 // DEV-ONLY dry-run dispatch mode
 //
 // Lets the Testing Lab exercise the REAL pipeline end-to-end — claim,
-// validation, per-tier rate-limit check, the actual computeMinGapMs()
-// pacing curve, retry-alarm targeting — against real DB rows, WITHOUT the
+// validation, constraint-based schedule calculation, retry-alarm targeting —
+// against real DB rows, WITHOUT the
 // final step (actual SmsManager/WhatsApp API/bulk-gateway call) ever
 // touching a real SIM, network account, or phone number. Only that last
 // hop is swapped for a simulated success; everything before it is
@@ -140,7 +78,7 @@ export const setDevDryRunMode = (enabled) => {
 
 export const isDevDryRunMode = () => __DEV__ && _devDryRunEnabled;
 
-const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, devDelayMs(ms)));
 
 const dispatchItem = async (platform, contact, message, smsPermissionGranted, waConfigured, bulkSmsConfigured, traceContext = {}, template = null) => {
   debugTrace('DispatchItemStart', {
@@ -171,20 +109,15 @@ const dispatchItem = async (platform, contact, message, smsPermissionGranted, wa
  * every other platform's lane (see processQueue — lanes run in parallel via
  * Promise.all).
  *
- * FIX 2 detail: the rate-limit check at the top of each iteration already
- * calls isRateLimited() to decide whether to break the lane — that same
- * call's per-tier `currentSent` figures are now also what computeMinGapMs()
- * uses for pacing, recomputed fresh after every dispatch instead of once
- * up front. When a break happens, the set of tiers that were ACTUALLY at
- * their cap (not just configured) is captured and threaded through to
- * scheduleRateLimitRetryAlarm() at the end of processQueue, so the retry
- * timer is driven by whichever tier is really blocking, not the loosest
- * (or tightest) of the three by coincidence.
+ * The engine is the sole source of the lane decision. When a tier blocks, its
+ * recovery-aware safe time is passed to the retry alarm so the lane resumes
+ * at the engine-calculated time instead of reimplementing window arithmetic.
  */
 const processLane = async (platformId, items, ctx) => {
   const {
     contactMap, templateMap, platformMap, smsPermissionGranted, waConfigured, bulkSmsConfigured,
     traceId, summary, rateLimitedPlatformIds, retryAfterOverrides, limitedWindowsByPlatform,
+    historyByPlatform, engineRetryTargetsByPlatform, minSendIntervalMs, recoveryThreshold,
     onProgress, claimedTotal,
   } = ctx;
 
@@ -198,31 +131,145 @@ const processLane = async (platformId, items, ctx) => {
       : 'none',
   });
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // FIX — double-counted rateLimited items across drain passes.
+  //
+  // Masla: processQueue()'s outer while(keepDraining) loop only stops when
+  // an ENTIRE pass makes zero progress. If a pass had SOME successful
+  // sends AND some items that hit the rate-limit wall (both in the same
+  // claim-batch, same platform), processedThisPass > 0 keeps the loop
+  // going — so the very next claimPendingQueue() call re-claims the items
+  // THIS SAME CALL just reverted-to-PENDING a moment ago, immediately
+  // re-hits the exact same still-active rate limit (no real time has
+  // elapsed within one synchronous processQueue() call), and reverts them
+  // AGAIN — double-incrementing summary.rateLimited for the same
+  // underlying block. Verified via a real-pipeline test: a 6-item batch
+  // against a limit of 5 reported rateLimited=2 instead of 1, and a
+  // 10-item batch against a limit of 5 reported rateLimited=10 instead of
+  // 5 — always exactly 2x, every time a pass mixed sends and blocks.
+  //
+  // Fix: once a platform has already been recorded as rate-limited earlier
+  // in THIS processQueue() call, any later re-claim of its (already
+  // reverted) items within the same call is known-redundant — revert them
+  // back to PENDING again (harmless, idempotent) but don't count them a
+  // second time. This doesn't change what actually gets sent or when
+  // (rate-limited items were never going to send in this call either
+  // way) — it only corrects the reported counter and skips the wasted
+  // isRateLimited() DB round-trip.
+  // ─────────────────────────────────────────────────────────────────────────
+  if (rateLimitedPlatformIds.has(platformId)) {
+    debugTrace('ProcessLaneSkipAlreadyRateLimited', {
+      traceId, platformId, itemCount: items.length,
+      reason: 'platform_already_rate_limited_this_call_avoiding_double_count',
+    });
+    revertBatchToPending(items.map((r) => r.id), traceId);
+    return;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Rate-limit engine setup for this lane.
+  //   history   — hydrate the platform's send history ONCE (persistent source
+  //               of truth: message_queue.sent_at), then append incrementally
+  //               as sends are accepted. Shared across drain passes via
+  //               historyByPlatform.
+  //   queueDepth — claimed items (status CLAIMED) + still-PENDING rows = how
+  //               many this platform still needs to send; feeds the smooth
+  //               pacing layer so a deep backlog spreads instead of bursting.
+  // ─────────────────────────────────────────────────────────────────────────
+  if (!historyByPlatform.has(platformId)) {
+    const maxWindowMs = rateLimits.reduce((m, t) => Math.max(m, t.windowMinutes * 60 * 1000), 0);
+    const hydrateAtMs = getNow();
+    historyByPlatform.set(
+      platformId,
+      pruneHistory(getSentHistoryForPlatform(platformId, hydrateAtMs - maxWindowMs), hydrateAtMs, maxWindowMs),
+    );
+  }
+  const history = historyByPlatform.get(platformId);
+  let executionContext = getExecutionContext(platformId);
+  let pendingCount = getPendingCountForPlatform(platformId);
+  // Tiers normalized to ms for the pure engine.
+  const engineTiers = rateLimits.map((t) => ({ windowMs: t.windowMinutes * 60 * 1000, limit: t.limitCount }));
+
   for (let i = 0; i < items.length; i++) {
-    // --- RATE LIMIT CHECK — break the whole lane immediately, batch-revert ---
-    // Shared helper isRateLimited() counts DB-sent + in-flight reservations,
-    // recomputed fresh each iteration so concurrent processSingleItem calls
-    // don't let this lane over-send. Its per-tier breakdown is reused below
-    // both for pacing (if we don't break) and for the retry-alarm target
-    // (if we do).
-    const { limited: rateLimitedNow, tiers: tierUsage } = isRateLimited(platformId, rateLimits);
-    if (rateLimitedNow) {
+    // --- RATE-LIMIT / SCHEDULE CHECK — constraint-based safe time ---
+    // calculateNextSafeSendTime() = max over EVERY tier of that tier's safe
+    // time (sliding-window, ANDed), plus the execution+gap floor and the
+    // smooth-pacing floor. When a tier is genuinely saturated and the
+    // recovery wait is beyond MAX_INLINE_DELAY_MS, the whole lane
+    // batch-reverts and a retry alarm is armed for exactly when a tier frees
+    // (recovery-aware, spec §12/§13). Otherwise the delay is inline pacing
+    // (a few seconds) and we proceed.
+    // Refresh pendingCount BEFORE computing queueDepth so newly-arrived
+    // PENDING rows immediately influence THIS send's pacing calculation
+    // (spec §3) — previously this was refreshed after queueDepth was
+    // already computed, so a queue-growth event only took effect starting
+    // the following item instead of the very next scheduling decision.
+    pendingCount = getPendingCountForPlatform(platformId);
+    const queueDepth = items.length - i + pendingCount;
+    // Refresh execution context live before every scheduling decision so the
+    // engine's execution-floor and pacing anchors reflect the most recent
+    // completed dispatch (recordDispatchCompletion updates the module-level
+    // ledger). Previously this was read once per lane, allowing a burst when
+    // recordDispatchCompletion updated the module state but the local
+    // variable stayed stale.
+    executionContext = getExecutionContext(platformId);
+    const nowMs = getNow();
+    const inFlightByWindow = {};
+    rateLimits.forEach((t) => {
+      inFlightByWindow[t.windowMinutes * 60 * 1000] = getInFlightCount(platformId, t.windowMinutes);
+    });
+    const decision = calculateNextSafeSendTime({
+      platformId, now: nowMs, queueDepth, tiers: engineTiers, history,
+      inFlightByWindow, executionContext, minSendIntervalMs, recoveryThreshold,
+    });
+    const delayMs = decision.safeTimeMs - nowMs;
+
+    if (decision.reason === 'saturated_recovery' && delayMs > MAX_INLINE_DELAY_MS) {
       const remaining = items.slice(i);
       debugTrace('ProcessLaneRateLimitBreak', {
         traceId, platformId, remainingCount: remaining.length,
-        limitedTiers: tierUsage.filter((t) => t.limited).map((t) => `${t.windowMinutes}min`).join(','),
+        nextSafeTimeMs: decision.safeTimeMs, delayMs,
+        limitedTiers: decision.perTier.filter((p) => p.safeTimeMs > nowMs).map((p) => `${Math.round(p.windowMs / 60000)}min`).join(','),
       });
       revertBatchToPending(remaining.map((r) => r.id), traceId);
       summary.rateLimited += remaining.length;
       rateLimitedPlatformIds.add(platformId);
-      // Only the tier(s) actually at/over cap right now should drive the
-      // retry timer — see rateLimitRetryAlarm.js for why using every
-      // configured tier's free-at (including ones nowhere near their cap)
-      // was scheduling retries far later than necessary.
-      const limitedSet = new Set(tierUsage.filter((t) => t.limited).map((t) => t.windowMinutes));
-      limitedWindowsByPlatform.set(platformId, limitedSet);
+      // Only the tier(s) actually still blocked drive the retry timer — the
+      // engine's recovery-aware per-tier safe times (see rateLimitRetryAlarm).
+      const blockingSet = new Set(
+        decision.perTier.filter((p) => p.safeTimeMs > nowMs).map((p) => Math.round(p.windowMs / 60000)),
+      );
+      if (blockingSet.size === 0 && decision.selectedTier) {
+        blockingSet.add(Math.round(decision.selectedTier.windowMs / 60000));
+      }
+      limitedWindowsByPlatform.set(platformId, blockingSet);
+      engineRetryTargetsByPlatform.set(
+        platformId,
+        decision.perTier.map((p) => ({ windowMinutes: Math.round(p.windowMs / 60000), safeTimeMs: p.safeTimeMs })),
+      );
       break;
     }
+
+    // Observability (spec §22) — why THIS send was scheduled for its time.
+    const selectedPerTier = decision.selectedTier
+      ? decision.perTier.find((p) => p.windowMs === decision.selectedTier.windowMs)
+      : null;
+    debugTrace('RateLimitScheduleDecision', {
+      traceId, messageId: items[i].id, platformId,
+      currentTimeMs: nowMs, queueSize: queueDepth,
+      nextSendTimeMs: decision.safeTimeMs, delayMs,
+      selectedConstraint: decision.reason,
+      tierWindowMs: decision.selectedTier?.windowMs ?? null,
+      tierLimit: decision.selectedTier?.limit ?? null,
+      tierCount: selectedPerTier?.count ?? null,
+      remainingCapacity: selectedPerTier?.remainingCapacity ?? null,
+      oldestTimestampMs: selectedPerTier?.oldestTimestampMs ?? null,
+      executionDurationMs:
+        executionContext.lastActualStartMs != null && executionContext.lastActualCompletionMs != null
+          ? executionContext.lastActualCompletionMs - executionContext.lastActualStartMs
+          : null,
+      reasonForDelay: decision.reason,
+    });
 
     const item = items[i];
     summary.processed += 1;
@@ -231,7 +278,7 @@ const processLane = async (platformId, items, ctx) => {
       traceId, queueId: item.id, contactId: item.contact_id, templateId: item.template_id,
       platformId, queueStatus: item.status, itemIndex: i, itemTotal: items.length,
     };
-    const itemStartTime = Date.now();
+    const itemStartTime = Date.now(); // real wall-clock — debug perf timing only, not scheduling
     debugTrace('ProcessQueueItemStart', traceContext);
 
     const contact  = contactMap.get(item.contact_id);
@@ -264,7 +311,17 @@ const processLane = async (platformId, items, ctx) => {
     // ========================================================================
 
     let brokeLaneOnRateLimit = false;
-    const reservationId = rateLimits.length > 0 ? reserveSlot(platformId) : null;
+    // ATOMIC check-and-reserve (R1): the engine decision above and this
+    // reservation are in the same synchronous block (no await between), so a
+    // concurrent worker can't interleave and double-book the last slot. The
+    // reservation is HELD across the inline delay so a concurrent worker can't
+    // refill the slot while we wait.
+    const reservationId = reserveSlot(platformId);
+    if (delayMs > 0) {
+      debugTrace('ProcessQueueInlineDelayBefore', { ...traceContext, delayMs });
+      await delay(delayMs);
+      debugTrace('ProcessQueueInlineDelayAfter', { ...traceContext, delayMs });
+    }
 
     try {
       const daysLeft = getDaysUntilExpiry(contact.expiry_datetime);
@@ -273,6 +330,8 @@ const processLane = async (platformId, items, ctx) => {
 
       debugTrace('DispatchItemBefore', { ...traceContext, platformId });
       let rawResult;
+      const actualStart = getNow();
+      recordDispatchStart(platformId, actualStart);
       try {
         rawResult = await dispatchItem(
           platform, contact, message, smsPermissionGranted, waConfigured, bulkSmsConfigured, traceContext, template,
@@ -280,21 +339,25 @@ const processLane = async (platformId, items, ctx) => {
       } finally {
         // Release the moment dispatch resolves (or throws) — DB state now
         // reflects reality, no need to keep holding the in-flight slot.
-        if (reservationId !== null) releaseSlot(platformId, reservationId);
+        releaseSlot(platformId, reservationId);
+        // Execution + gap (CONFIRMED BEHAVIOR 1): the next send may only
+        // start minSendIntervalMs AFTER this dispatch completes.
+        recordDispatchCompletion(platformId, getNow());
       }
       debugTrace('DispatchItemAfter', { ...traceContext, rawResult });
 
       // Normalize outcome via shared helper
       const outcome = normalizeDispatchResult(rawResult);
 
-      if (outcome.status === 'sent') {
-        markAsSent(item.id, traceId);
-        summary.sent += 1;
-        debugTrace('ProcessQueueItemOutcome', { ...traceContext, outcome: 'sent' });
-      } else if (outcome.status === 'opened') {
-        markAsSent(item.id, traceId);
-        summary.opened += 1;
-        debugTrace('ProcessQueueItemOutcome', { ...traceContext, outcome: 'opened' });
+      if (outcome.status === 'sent' || outcome.status === 'opened') {
+        // Accepted by the provider — this is the moment that consumes
+        // rate-limit capacity. Record the ACTUAL send start timestamp into
+        // the engine's history (never a scheduled/reserved/failed send).
+        appendSend(history, actualStart);
+        markAsSent(item.id, traceId, actualStart);
+        if (outcome.status === 'sent') summary.sent += 1;
+        else summary.opened += 1;
+        debugTrace('ProcessQueueItemOutcome', { ...traceContext, outcome: outcome.status });
       } else if (outcome.status === 'rate_limited_WA') {
         // Meta itself is throttling (HTTP 429 / error 130429) — this is
         // temporary, not a permanent failure. Revert this item AND
@@ -340,17 +403,8 @@ const processLane = async (platformId, items, ctx) => {
     debugTraceDuration('ProcessQueueItemEnd', itemStartTime, { ...traceContext, ...summary });
 
     if (brokeLaneOnRateLimit) break;
-
-    if (i < items.length - 1) {
-      // Recompute AFTER this dispatch — the send that just happened may
-      // have pushed a tier's currentSent up, which should be reflected in
-      // the gap before the NEXT item, not the gap that preceded this one.
-      const { tiers: tierUsageAfterDispatch } = isRateLimited(platformId, rateLimits);
-      const minGapMs = computeMinGapMs(platformId, rateLimits, tierUsageAfterDispatch);
-      debugTrace('ProcessQueueInterItemDelayBefore', { ...traceContext, delayMs: minGapMs });
-      await delay(minGapMs);
-      debugTrace('ProcessQueueInterItemDelayAfter', { ...traceContext, delayMs: minGapMs });
-    }
+    // No post-dispatch recompute: the next iteration's calculateNextSafeSendTime
+    // call reads the freshly-appended history + execution context.
   }
 
   debugTrace('ProcessLaneEnd', { traceId, platformId });
@@ -364,7 +418,7 @@ export const processQueue = async (onProgress, parentTraceId = null) => {
   }
   _isProcessing = true;
 
-  const startTime = Date.now();
+  const startTime = Date.now(); // real wall-clock — debug perf timing only, not scheduling
   const traceId = parentTraceId ?? generateTraceId('processQueue');
   const summary = { processed: 0, sent: 0, opened: 0, failed: 0, rateLimited: 0, rateLimitedPlatformIds: [] };
   debugTrace('ProcessQueueStart', { traceId, parentTraceId: parentTraceId ?? 'none' });
@@ -412,6 +466,21 @@ export const processQueue = async (onProgress, parentTraceId = null) => {
     // tier(s) really blocking, not every configured tier for that
     // platform (see rateLimitRetryAlarm.js).
     const limitedWindowsByPlatform = new Map();
+
+    // ───────────────────────────────────────────────────────────────────────
+    // Rate-limit engine config + per-platform state for THIS run. Config is
+    // re-read from settings every run, so a recovery-threshold or
+    // min-send-interval change applies to the very next run — no stale
+    // schedule to cancel (spec §15).
+    //   historyByPlatform       — hydrated once per platform, appended as sends
+    //                             are accepted (source of truth: message_queue.sent_at)
+    //   engineRetryTargetsByPlatform — recovery-aware per-tier safe times used
+    //                             to arm each retry alarm precisely
+    // ───────────────────────────────────────────────────────────────────────
+    const minSendIntervalMs = getMinSendIntervalMs();
+    const recoveryThreshold = getRateLimitRecoveryThreshold();
+    const historyByPlatform = new Map();
+    const engineRetryTargetsByPlatform = new Map();
 
     // ───────────────────────────────────────────────────────────────────────
     // FIX 4 — Drain the whole queue in one call, not just one claim-batch.
@@ -466,6 +535,7 @@ export const processQueue = async (onProgress, parentTraceId = null) => {
       const laneCtx = {
         contactMap, templateMap, platformMap, smsPermissionGranted, waConfigured, bulkSmsConfigured,
         traceId, summary, rateLimitedPlatformIds, retryAfterOverrides, limitedWindowsByPlatform,
+        historyByPlatform, engineRetryTargetsByPlatform, minSendIntervalMs, recoveryThreshold,
         onProgress, claimedTotal: claimedTotalSoFar,
       };
 
@@ -508,6 +578,7 @@ export const processQueue = async (onProgress, parentTraceId = null) => {
           platformId,
           retryAfterOverrides.get(platformId) ?? null,
           limitedWindowsByPlatform.get(platformId) ?? null,
+          engineRetryTargetsByPlatform.get(platformId) ?? null,
         );
       }
     }
@@ -535,9 +606,11 @@ export const processQueue = async (onProgress, parentTraceId = null) => {
  * Reuses the same validation + dispatch logic as processLane.
  */
 export const processSingleItem = async (queueId, traceId = null) => {
-  const startTime = Date.now();
   const tid = traceId ?? generateTraceId('processSingleItem');
   debugTrace('ProcessSingleItemStart', { traceId: tid, queueId });
+
+  const minSendIntervalMs = getMinSendIntervalMs();
+  const recoveryThreshold = getRateLimitRecoveryThreshold();
 
   try {
     const item = getQueueRowById(queueId);
@@ -560,24 +633,49 @@ export const processSingleItem = async (queueId, traceId = null) => {
       return { sent: 0, failed: 0 };
     }
 
-    // --- RATE LIMIT CHECK (shared helper) ---
+    // --- RATE-LIMIT / SCHEDULE CHECK (constraint-based, same engine as
+    // processLane) — max over EVERY tier of its safe time, plus execution+gap
+    // and pacing. Far-off (saturated tier, recovery wait) → revert + arm a
+    // recovery-aware retry alarm. Near → reserve, wait inline, dispatch.
     const rateLimits = resolveRateLimits(claimed.platform_id);
+    const maxWindowMs = rateLimits.reduce((m, t) => Math.max(m, t.windowMinutes * 60 * 1000), 0);
+    const history = pruneHistory(
+      getSentHistoryForPlatform(claimed.platform_id, getNow() - maxWindowMs),
+      getNow(),
+      maxWindowMs,
+    );
+    const executionContext = getExecutionContext(claimed.platform_id);
+    const queueDepth = 1 + getPendingCountForPlatform(claimed.platform_id);
+    const engineTiers = rateLimits.map((t) => ({ windowMs: t.windowMinutes * 60 * 1000, limit: t.limitCount }));
+    const nowMs = getNow();
+    const inFlightByWindow = {};
+    rateLimits.forEach((t) => {
+      inFlightByWindow[t.windowMinutes * 60 * 1000] = getInFlightCount(claimed.platform_id, t.windowMinutes);
+    });
+    const decision = calculateNextSafeSendTime({
+      platformId: claimed.platform_id, now: nowMs, queueDepth, tiers: engineTiers, history,
+      inFlightByWindow, executionContext, minSendIntervalMs, recoveryThreshold,
+    });
+    const delayMs = decision.safeTimeMs - nowMs;
     let reservationId = null;
-    if (rateLimits.length > 0) {
-      const { limited: rateLimitedNow, currentSent, tiers } = isRateLimited(claimed.platform_id, rateLimits);
-      if (rateLimitedNow) {
-        debugTrace('ProcessSingleItemRateLimited', {
-          traceId: tid, queueId, platformId: claimed.platform_id,
-          currentSent, tiers: tiers.map((t) => `${t.currentSent}/${t.limitCount} per ${t.windowMinutes}min${t.limited ? ' (BLOCKED)' : ''}`).join(', '),
-        });
-        revertToPending(queueId, tid);
-        // FIX 3 — only the tier(s) actually at cap, same as processLane.
-        const limitedSet = new Set(tiers.filter((t) => t.limited).map((t) => t.windowMinutes));
-        await scheduleRateLimitRetryAlarm(claimed.platform_id, null, limitedSet);
-        return { sent: 0, failed: 0 };
-      }
-      reservationId = reserveSlot(claimed.platform_id);
+    if (decision.reason === 'saturated_recovery' && delayMs > MAX_INLINE_DELAY_MS) {
+      debugTrace('ProcessSingleItemRateLimited', {
+        traceId: tid, queueId, platformId: claimed.platform_id,
+        nextSafeTimeMs: decision.safeTimeMs, delayMs, reason: decision.reason,
+        tiers: decision.perTier.map((t) => `${t.count}/${t.limit} per ${Math.round(t.windowMs / 60000)}min`).join(', '),
+      });
+      revertToPending(queueId, tid);
+      // FIX 3 — only the tier(s) actually still blocked drive the retry timer.
+      const blockingSet = new Set(
+        decision.perTier.filter((p) => p.safeTimeMs > nowMs).map((p) => Math.round(p.windowMs / 60000)),
+      );
+      const engineTierSafeTimes = decision.perTier.map((p) => ({ windowMinutes: Math.round(p.windowMs / 60000), safeTimeMs: p.safeTimeMs }));
+      await scheduleRateLimitRetryAlarm(claimed.platform_id, null, blockingSet.size ? blockingSet : null, engineTierSafeTimes);
+      return { sent: 0, failed: 0 };
     }
+    // ATOMIC check-and-reserve: decision + reserve in the same sync block.
+    reservationId = reserveSlot(claimed.platform_id);
+    if (delayMs > 0) await delay(delayMs);
 
     // Load references
     const contacts = getAllContacts();
@@ -605,6 +703,7 @@ export const processSingleItem = async (queueId, traceId = null) => {
     let smsPermissionGranted = false;
     let rawResult;
     let traceContext;
+    let actualStart = null;
     try {
       if (Platform.OS === 'android') {
         smsPermissionGranted = await requestSmsPermission();
@@ -616,6 +715,8 @@ export const processSingleItem = async (queueId, traceId = null) => {
       const message  = personalizeMessage(template.body, contact, daysLeft);
 
       traceContext = { traceId: tid, queueId, contactId: contact.id, templateId: template.id, platformId: claimed.platform_id };
+      actualStart = getNow();
+      recordDispatchStart(claimed.platform_id, actualStart);
       rawResult = await dispatchItem(
         platform, contact, message, smsPermissionGranted, waConfigured, bulkSmsConfigured, traceContext, template,
       );
@@ -624,12 +725,16 @@ export const processSingleItem = async (queueId, traceId = null) => {
       // otherwise leak the slot until pruneExpired's window-based cleanup
       // eventually clears it, temporarily under-counting real capacity.
       if (reservationId !== null) releaseSlot(claimed.platform_id, reservationId);
+      // Execution + gap (CONFIRMED BEHAVIOR 1).
+      recordDispatchCompletion(claimed.platform_id, getNow());
     }
 
     const outcome = normalizeDispatchResult(rawResult);
 
     if (outcome.status === 'sent' || outcome.status === 'opened') {
-      markAsSent(queueId, tid);
+      // Accepted by the provider — consumes rate-limit capacity.
+      if (actualStart !== null) appendSend(history, actualStart);
+      markAsSent(queueId, tid, actualStart);
       debugTrace('ProcessSingleItemOutcome', { ...traceContext, outcome: outcome.status });
       refreshReminderSurfacesIfChanged({ sent: 1, opened: 0, failed: 0 });
       return { sent: 1, failed: 0 };

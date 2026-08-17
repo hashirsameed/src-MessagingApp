@@ -87,6 +87,22 @@ export default function QueueScreen() {
     setHasMoreByTab((prev) => ({ ...prev, [tab]: data.length === PAGE_SIZE }));
   }, [dateFrom, dateTo]);
 
+  // Keep already loaded pages during automatic refreshes. Resetting to page
+  // zero here used to make the list jump while the user was scrolling.
+  const refreshTabInPlace = useCallback((tab) => {
+    setItemsByTab((prevItems) => {
+      const currentCount = prevItems[tab]?.length || PAGE_SIZE;
+      const limit = Math.max(currentCount, PAGE_SIZE);
+      const rangeActive = isRangeActive();
+      const data = rangeActive
+        ? getQueueByDateRange(tab, `${dateFrom}T00:00:00Z`, `${dateTo}T23:59:59Z`, limit, 0)
+        : getQueuePage(tab, limit, 0);
+      setHasMoreByTab((prev) => ({ ...prev, [tab]: data.length === limit }));
+      setPageByTab((prev) => ({ ...prev, [tab]: Math.max(0, Math.ceil(limit / PAGE_SIZE) - 1) }));
+      return { ...prevItems, [tab]: data };
+    });
+  }, [dateFrom, dateTo]);
+
   const loadMoreForTab = (tab) => {
     if (loadingMore || !hasMoreByTab[tab]) return;
     setLoadingMore(true);
@@ -148,9 +164,12 @@ export default function QueueScreen() {
   useFocusEffect(
     useCallback(() => {
       loadData();
-      const interval = setInterval(loadData, 5000);
+      const interval = setInterval(() => {
+        setCounts(getQueueCounts());
+        refreshTabInPlace(activeTab);
+      }, 5000);
       return () => clearInterval(interval);
-    }, [loadData])
+    }, [loadData, refreshTabInPlace, activeTab])
   );
 
   const onRefresh = useCallback(async () => {

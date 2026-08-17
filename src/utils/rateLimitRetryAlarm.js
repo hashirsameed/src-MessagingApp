@@ -1,6 +1,4 @@
 import { NativeModules, Platform } from 'react-native';
-import { getWindowFreeAtMs } from '../database/rateLimitDB';
-import { resolveRateLimits } from './queueUtils';
 import { handleError } from './errorHandler';
 import { debugTrace, debugTraceError, generateTraceId } from './debugTrace';
 
@@ -60,6 +58,15 @@ export const getRetryRequestCode = (platformId) => {
  *   windowMinutes values (e.g. {15, 60}) that were ACTUALLY at/over their
  *   cap when this platform's lane broke, as determined by isRateLimited()'s
  *   per-tier `limited` flag (see queueProcessor.js).
+ * @param {Array<{windowMinutes: number, safeTimeMs: number}>|null} [engineTierSafeTimes]
+ *   Optional — per-tier RECOVERY-AWARE safe times precomputed by the
+ *   rate-limit engine (rateLimitEngine.calculateNextSafeSendTime's perTier).
+ *   When given, the retry is armed for the latest (max) of these instead of
+ *   the legacy "oldest send + window" (1-slot-free) estimate. This is what
+ *   makes the 50% recovery policy visible to the alarm: after a saturated
+ *   tier, we wait until ~half its capacity has returned, not until one slot
+ *   frees (which would immediately re-saturate and re-arm). Priority:
+ *   explicitRetryAfterMs (Meta) > engineTierSafeTimes > legacy estimate.
  *
  *   FIX — WHY THIS MATTERS: previously, whenever a platform got rate
  *   limited, this function computed getWindowFreeAtMs() for EVERY
@@ -79,7 +86,7 @@ export const getRetryRequestCode = (platformId) => {
  *   own tier math at all), behavior falls back to considering every
  *   configured tier, same as before.
  */
-export const scheduleRateLimitRetryAlarm = async (platformId, explicitRetryAfterMs = null, limitedWindows = null) => {
+export const scheduleRateLimitRetryAlarm = async (platformId, explicitRetryAfterMs = null, limitedWindows = null, engineTierSafeTimes = null) => {
   if (!isAlarmModuleAvailable()) return 'SKIPPED_NATIVE_UNAVAILABLE';
 
   const traceId = generateTraceId('rateLimitRetry');
@@ -91,43 +98,22 @@ export const scheduleRateLimitRetryAlarm = async (platformId, explicitRetryAfter
       retryAtMs = Date.now() + explicitRetryAfterMs;
       source = 'explicit_override';
       debugTrace('RateLimitRetryUsingExplicitOverride', { traceId, platformId, explicitRetryAfterMs });
-    } else {
-      const rateLimits = resolveRateLimits(platformId);
-      if (rateLimits.length === 0) {
-        // No configured limit and no explicit override — nothing to retry against.
-        debugTrace('RateLimitRetrySkip', { traceId, platformId, reason: 'no_rate_limit_configured' });
-        return 'SKIPPED_NO_LIMIT';
-      }
-
-      // FIX — only consider tiers that are ACTUALLY at/over their cap right
-      // now. A tier that still has headroom isn't what's blocking the next
-      // send, so its (potentially much later) free-at time shouldn't drag
-      // the retry out. Falls back to every configured tier when the caller
-      // doesn't know which specific tier(s) tripped (limitedWindows is
-      // null/empty) — this keeps the old, safer-but-slower behavior for
-      // any caller that hasn't been updated to pass it yet.
-      const relevantTiers = (limitedWindows && limitedWindows.size > 0)
-        ? rateLimits.filter((t) => limitedWindows.has(t.windowMinutes))
-        : rateLimits;
-
-      debugTrace('RateLimitRetryTierSelection', {
-        traceId, platformId,
-        consideredTiers: relevantTiers.map((t) => `${t.windowMinutes}min`).join(',') || 'none',
-        allConfiguredTiers: rateLimits.map((t) => `${t.windowMinutes}min`).join(','),
-        usedFallbackToAllTiers: !(limitedWindows && limitedWindows.size > 0),
-      });
-
-      // Every active RELEVANT tier must be clear before a send can go
-      // through again, so the true retry time is the LATEST (max) of each
-      // relevant tier's own free-at estimate — the slowest of the actually-
-      // blocking tiers is what's really gating the next send. A tier with
-      // no SENT rows in its window returns null (nothing to wait on for
-      // that tier) and is ignored.
-      retryAtMs = relevantTiers.reduce((latest, tier) => {
-        const tierFreeAtMs = getWindowFreeAtMs(platformId, tier.windowMinutes);
-        if (tierFreeAtMs === null) return latest;
-        return latest === null ? tierFreeAtMs : Math.max(latest, tierFreeAtMs);
+    } else if (engineTierSafeTimes && engineTierSafeTimes.length > 0) {
+      // Recovery-aware safe times from the rate-limit engine — the latest of
+      // the actually-relevant tiers is when a slot truly frees per the
+      // configured recoveryThreshold (NOT the first-freed-slot estimate).
+      const relevant = (limitedWindows && limitedWindows.size > 0)
+        ? engineTierSafeTimes.filter((t) => limitedWindows.has(t.windowMinutes))
+        : engineTierSafeTimes;
+      retryAtMs = relevant.reduce((latest, t) => {
+        if (t.safeTimeMs == null) return latest;
+        return latest === null ? t.safeTimeMs : Math.max(latest, t.safeTimeMs);
       }, null);
+      source = 'engine_tier_safe_time';
+      debugTrace('RateLimitRetryUsingEngineTierSafeTimes', {
+        traceId, platformId,
+        tiers: relevant.map((t) => `${t.windowMinutes}min`).join(',') || 'none',
+      });
     }
 
     if (retryAtMs === null || retryAtMs <= Date.now()) {

@@ -4,7 +4,11 @@ import {
   StatusBar, ScrollView, Alert, ActivityIndicator, NativeModules, Platform, Switch, PermissionsAndroid,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
-import { getDefaultPlatform, setDefaultPlatform } from '../database/settingsDB';
+import {
+  getDefaultPlatform, setDefaultPlatform,
+  getMinSendIntervalMs, setMinSendIntervalMs,
+  getRateLimitRecoveryThreshold, setRateLimitRecoveryThreshold,
+} from '../database/settingsDB';
 import { getAllPlatforms, togglePlatformEnabled, seedDefaultPlatforms } from '../database/platformDB';
 import { getAllRateLimits, setRateLimit, clearRateLimit, getAllRateLimitTiers, setRateLimitTier, deleteRateLimitTier, validateTierMonotonicity } from '../database/rateLimitDB';
 import { handleError, showError, showSuccess, ErrorMessages } from '../utils/errorHandler';
@@ -40,6 +44,8 @@ export default function SettingsScreen({ navigation }) {
   const [platforms, setPlatforms]                   = useState([]);
   const [expandedIds, setExpandedIds]               = useState(new Set());
   const [devMode, setDevModeState]                 = useState(false);
+  const [minSendInterval, setMinSendInterval]       = useState('');
+  const [recoveryThresholdPct, setRecoveryThresholdPct] = useState('');
 
   const loadSettings = async () => {
     try {
@@ -61,6 +67,8 @@ export default function SettingsScreen({ navigation }) {
       });
       setRateLimitDrafts(drafts);
       setTiersByPlatform(getAllRateLimitTiers());
+      setMinSendInterval(String(getMinSendIntervalMs()));
+      setRecoveryThresholdPct(String(Math.round(getRateLimitRecoveryThreshold() * 100)));
       setPlatforms(getAllPlatforms());
       setDevModeState(isDevModeOn());
       const [configured, bulkConfigured] = await Promise.all([
@@ -195,6 +203,42 @@ export default function SettingsScreen({ navigation }) {
       showSuccess('Removed', `${platformName} now has no send limit.`);
     } catch (error) {
       handleError(error, 'SettingsScreen.handleClearRateLimit');
+      showError('Error', ErrorMessages.DB_WRITE);
+    }
+  };
+
+  // ── Global rate-limiting scheduler settings ─────────────────────────────
+  // These apply to EVERY platform and are re-read by the rate-limit engine on
+  // every processQueue run, so saving here takes effect immediately.
+
+  const handleSaveMinSendInterval = () => {
+    const v = parseInt(minSendInterval, 10);
+    if (isNaN(v) || v < 250) {
+      showError('Invalid value', 'Minimum gap must be at least 250 ms.');
+      return;
+    }
+    try {
+      const ok = setMinSendIntervalMs(v);
+      if (!ok) { showError('Error', ErrorMessages.DB_WRITE); return; }
+      showSuccess('Saved', `Minimum gap set to ${v} ms after each message completes.`);
+    } catch (error) {
+      handleError(error, 'SettingsScreen.handleSaveMinSendInterval');
+      showError('Error', ErrorMessages.DB_WRITE);
+    }
+  };
+
+  const handleSaveRecoveryThreshold = () => {
+    const v = parseFloat(recoveryThresholdPct);
+    if (isNaN(v) || v < 0 || v > 100) {
+      showError('Invalid value', 'Recovery threshold must be between 0 and 100%.');
+      return;
+    }
+    try {
+      const ok = setRateLimitRecoveryThreshold(v / 100);
+      if (!ok) { showError('Error', ErrorMessages.DB_WRITE); return; }
+      showSuccess('Saved', `Recovery threshold set to ${v}% of capacity.`);
+    } catch (error) {
+      handleError(error, 'SettingsScreen.handleSaveRecoveryThreshold');
       showError('Error', ErrorMessages.DB_WRITE);
     }
   };
@@ -694,6 +738,60 @@ export default function SettingsScreen({ navigation }) {
             trackColor={{ false: '#E0E0E0', true: '#1A1A2E' }}
             thumbColor="#fff"
           />
+        </View>
+      </View>
+
+      {/* ── Rate Limiting Scheduler — global, applies to every platform ── */}
+      <Text style={[styles.sectionLabel, { marginTop: 28 }]}>RATE LIMITING SCHEDULER</Text>
+      <Text style={styles.sectionHint}>
+        These apply to every platform. The scheduler re-reads them on each run, so changes take effect immediately.
+      </Text>
+
+      <View style={styles.accSection}>
+        <Text style={styles.accSectionLabel}>Minimum gap between messages (execution + gap)</Text>
+        <Text style={styles.accSectionHint}>
+          The next message may only start this many ms after the previous message's execution completes.
+          Default 1000 ms = at most one message per second.
+        </Text>
+        <View style={styles.rateLimitRow}>
+          <TextInput
+            style={styles.rateLimitCountInput}
+            keyboardType="numeric"
+            value={minSendInterval}
+            onChangeText={(v) => setMinSendInterval(v.replace(/[^0-9]/g, ''))}
+            placeholder="1000"
+            placeholderTextColor="#BDBDBD"
+          />
+          <Text style={styles.rateLimitUnitText}>ms</Text>
+        </View>
+        <View style={styles.rateLimitBtnRow}>
+          <TouchableOpacity onPress={handleSaveMinSendInterval} style={styles.smsLimitSaveBtn} activeOpacity={0.8}>
+            <Text style={styles.smsLimitSaveBtnText}>Save Minimum Gap</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+
+      <View style={styles.accSection}>
+        <Text style={styles.accSectionLabel}>Recovery threshold (%)</Text>
+        <Text style={styles.accSectionHint}>
+          When a tier reaches its limit, wait until this much of its capacity has returned before resuming
+          normal scheduling. Default 50% (0% = resume as soon as one slot frees).
+        </Text>
+        <View style={styles.rateLimitRow}>
+          <TextInput
+            style={styles.rateLimitCountInput}
+            keyboardType="numeric"
+            value={recoveryThresholdPct}
+            onChangeText={(v) => setRecoveryThresholdPct(v.replace(/[^0-9.]/g, ''))}
+            placeholder="50"
+            placeholderTextColor="#BDBDBD"
+          />
+          <Text style={styles.rateLimitUnitText}>%</Text>
+        </View>
+        <View style={styles.rateLimitBtnRow}>
+          <TouchableOpacity onPress={handleSaveRecoveryThreshold} style={styles.smsLimitSaveBtn} activeOpacity={0.8}>
+            <Text style={styles.smsLimitSaveBtnText}>Save Recovery Threshold</Text>
+          </TouchableOpacity>
         </View>
       </View>
 

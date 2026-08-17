@@ -1,11 +1,11 @@
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
   View, Text, FlatList, TouchableOpacity, Switch,
   StyleSheet, StatusBar, Platform, ScrollView, Animated, Dimensions,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { getAllTemplates, deleteTemplate, toggleTemplateActive } from '../database/templateDB';
+import { getTemplatesPage, getTemplateCountsByPlatform, deleteTemplate, toggleTemplateActive } from '../database/templateDB';
 import { getEnabledPlatforms, seedDefaultPlatforms } from '../database/platformDB';
 import { syncWhatsAppTemplatesCache } from '../database/whatsappTemplateCacheDB';
 import { fetchMetaTemplates } from '../utils/metaTemplateService';
@@ -17,13 +17,17 @@ import WhatsAppTemplatesScreen from './WhatsAppTemplatesScreen';
 
 const SCREEN_WIDTH = Dimensions.get('window').width;
 const WA_PAGES = ['Scheduled', 'Approved Templates'];
+const PAGE_SIZE = 30;
 
 export default function TemplatesScreen({ navigation }) {
   const insets = useSafeAreaInsets();
   const [platforms, setPlatforms]   = useState([]);
   const [activeTab, setActiveTab]   = useState('sms');
-  const [templates, setTemplates]   = useState([]);
   const [templateCounts, setTemplateCounts] = useState({});
+  const [itemsByTab, setItemsByTab]     = useState({});
+  const [pageByTab, setPageByTab]       = useState({});
+  const [hasMoreByTab, setHasMoreByTab] = useState({});
+  const [loadingMore, setLoadingMore]   = useState(false);
   const [loading, setLoading]       = useState(true);
   const [waPageIndex, setWaPageIndex] = useState(0);
   const waScrollX = useRef(new Animated.Value(0)).current;
@@ -47,19 +51,13 @@ export default function TemplatesScreen({ navigation }) {
 
   const buildPlatformState = () => {
     const allPlatforms = getEnabledPlatforms();
-    const allTemplates = getAllTemplates();
+    const countByPlatform = getTemplateCountsByPlatform();
 
     // Count local templates per platform, then sort tabs so the platform
     // with the most templates leads. Now that WhatsApp schedules are real
     // local `templates` rows too (platform_id='whatsapp', pointing at an
     // approved Meta template), this count is consistent across every
     // platform — no separate WhatsApp-only override needed anymore.
-    const countByPlatform = {};
-    allTemplates.forEach((t) => {
-      const pid = t.platform_id ?? 'sms';
-      countByPlatform[pid] = (countByPlatform[pid] ?? 0) + 1;
-    });
-
     const sortedPlatforms = [...allPlatforms].sort(
       (a, b) => (countByPlatform[b.id] ?? 0) - (countByPlatform[a.id] ?? 0)
     );
@@ -68,7 +66,29 @@ export default function TemplatesScreen({ navigation }) {
     setTemplateCounts(countByPlatform);
     // Keep current tab if it still exists, else fall back to first platform.
     setActiveTab((prev) => (sortedPlatforms.some((p) => p.id === prev) ? prev : (sortedPlatforms[0]?.id ?? 'sms')));
-    setTemplates(allTemplates);
+  };
+
+  const loadTabPage = useCallback((tab) => {
+    const data = getTemplatesPage(tab, PAGE_SIZE, 0);
+    setItemsByTab((prev) => ({ ...prev, [tab]: data }));
+    setPageByTab((prev) => ({ ...prev, [tab]: 0 }));
+    setHasMoreByTab((prev) => ({ ...prev, [tab]: data.length === PAGE_SIZE }));
+  }, []);
+
+  const loadMoreForTab = (tab) => {
+    if (loadingMore || !hasMoreByTab[tab]) return;
+    setLoadingMore(true);
+    try {
+      const nextPage = (pageByTab[tab] ?? 0) + 1;
+      const data = getTemplatesPage(tab, PAGE_SIZE, nextPage * PAGE_SIZE);
+      if (data.length > 0) {
+        setItemsByTab((prev) => ({ ...prev, [tab]: [...(prev[tab] || []), ...data] }));
+        setPageByTab((prev) => ({ ...prev, [tab]: nextPage }));
+      }
+      setHasMoreByTab((prev) => ({ ...prev, [tab]: data.length === PAGE_SIZE }));
+    } finally {
+      setLoadingMore(false);
+    }
   };
 
   const loadAll = async () => {
@@ -80,6 +100,7 @@ export default function TemplatesScreen({ navigation }) {
       // call — then refresh the WA cache in the background and re-read
       // counts once it lands, so the badge updates without a flicker/hang.
       buildPlatformState();
+      loadTabPage(activeTab);
       setLoading(false);
 
       await refreshWhatsAppCache();
@@ -93,10 +114,14 @@ export default function TemplatesScreen({ navigation }) {
 
   useFocusEffect(useCallback(() => { loadAll(); }, []));
 
+  useEffect(() => {
+    if (activeTab && !itemsByTab[activeTab]) loadTabPage(activeTab);
+  }, [activeTab, itemsByTab, loadTabPage]);
+
   const activePlatform = platforms.find((p) => p.id === activeTab);
   const isManagedRemote = activePlatform?.platform_type === 'managed_remote';
 
-  const tabTemplates = templates.filter((t) => (t.platform_id ?? 'sms') === activeTab);
+  const tabTemplates = itemsByTab[activeTab] || [];
 
   // ── Local-text tab: reminder template list (same behavior as before) ────
   const handleToggle = async (item, value) => {
@@ -104,9 +129,12 @@ export default function TemplatesScreen({ navigation }) {
       const ok = toggleTemplateActive(item.id, value);
       if (!ok) { showError('Error', ErrorMessages.DB_WRITE); return; }
 
-      setTemplates((prev) =>
-        prev.map((t) => t.id === item.id ? { ...t, is_active: value ? 1 : 0 } : t)
-      );
+      setItemsByTab((prev) => ({
+        ...prev,
+        [activeTab]: (prev[activeTab] || []).map((t) =>
+          t.id === item.id ? { ...t, is_active: value ? 1 : 0 } : t
+        ),
+      }));
 
       if (Platform.OS === 'android') {
         const updatedTemplate = { ...item, is_active: value ? 1 : 0 };
@@ -131,7 +159,8 @@ export default function TemplatesScreen({ navigation }) {
           }
           const ok = deleteTemplate(id);
           if (!ok) { showError('Error', ErrorMessages.DB_DELETE); return; }
-          loadAll();
+          loadTabPage(activeTab);
+          buildPlatformState();
         } catch (error) {
           handleError(error, 'TemplatesScreen.handleDelete');
           showError('Error', ErrorMessages.DB_DELETE);
@@ -266,7 +295,7 @@ export default function TemplatesScreen({ navigation }) {
                     styles.waSegmentText,
                     waPageIndex === index && styles.waSegmentTextActive,
                   ]}>
-                    {label}{label === 'Scheduled' && tabTemplates.length > 0 ? `  ·  ${tabTemplates.length}` : ''}
+                    {label}{label === 'Scheduled' && (templateCounts[activeTab] ?? 0) > 0 ? `  ·  ${templateCounts[activeTab]}` : ''}
                   </Text>
                 </TouchableOpacity>
               ))}
@@ -294,7 +323,10 @@ export default function TemplatesScreen({ navigation }) {
                 data={tabTemplates}
                 keyExtractor={(item) => item.id}
                 renderItem={renderItem}
+                onEndReached={() => loadMoreForTab(activeTab)}
+                onEndReachedThreshold={0.4}
                 contentContainerStyle={{ padding: 16, paddingBottom: 140 }}
+                ListFooterComponent={loadingMore ? <Text style={styles.loadingMore}>Loading more...</Text> : null}
                 ListEmptyComponent={
                   <View style={styles.emptyContainer}>
                     <Text style={styles.emptyIcon}>🗓</Text>
@@ -325,7 +357,10 @@ export default function TemplatesScreen({ navigation }) {
             data={tabTemplates}
             keyExtractor={(item) => item.id}
             renderItem={renderItem}
+            onEndReached={() => loadMoreForTab(activeTab)}
+            onEndReachedThreshold={0.4}
             contentContainerStyle={{ padding: 16, paddingBottom: 140 }}
+            ListFooterComponent={loadingMore ? <Text style={styles.loadingMore}>Loading more...</Text> : null}
             ListEmptyComponent={
               <View style={styles.emptyContainer}>
                 <Text style={styles.emptyIcon}>📝</Text>
@@ -351,6 +386,7 @@ const styles = StyleSheet.create({
   container:      { flex: 1, backgroundColor: '#F8F9FA' },
   header:         { backgroundColor: '#fff', paddingHorizontal: 20, paddingTop: 20, paddingBottom: 10, borderBottomWidth: 1, borderBottomColor: '#F0F0F0' },
   headerTitle:    { fontSize: 28, fontWeight: '700', color: '#1A1A2E' },
+  loadingMore:    { textAlign: 'center', color: '#9CA3AF', paddingVertical: 12 },
 
   tabBarWrap:     { backgroundColor: '#F8F9FA' },
   tabBarContent:  { paddingHorizontal: 16, paddingVertical: 8, gap: 6 },

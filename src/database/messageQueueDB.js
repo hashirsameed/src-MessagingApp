@@ -259,6 +259,24 @@ export const getQueueCounts = () => {
   }
 };
 
+// How many messages are still PENDING for ONE platform. The scheduler's
+// queueDepth input — with it, the pacing layer can spread a deep backlog
+// across a tier's window instead of bursting into a wait. Used by
+// processLane/processSingleItem via the rate-limit engine.
+export const getPendingCountForPlatform = (platformId) => {
+  try {
+    const db = getDB();
+    const result = db.execute(
+      'SELECT COUNT(*) as count FROM message_queue WHERE platform_id = ? AND status = ?;',
+      [platformId, QUEUE_STATUS.PENDING],
+    );
+    return result.rows?._array?.[0]?.count ?? 0;
+  } catch (error) {
+    handleError(error, 'getPendingCountForPlatform');
+    return 0;
+  }
+};
+
 // Per-status paginated page — PENDING sorted soonest-due-first (useful
 // order for "what fires next"), SENT/FAILED sorted most-recent-first.
 // This replaces the old "load the whole table, filter in JS" approach
@@ -302,13 +320,13 @@ export const getQueueByDateRange = (status, fromISO, toISO, limit = 30, offset =
   }
 };
 
-export const markAsSent = (id, traceId = null) => {
+export const markAsSent = (id, traceId = null, sentAt = null) => {
   debugTrace('MarkAsSentStart', { traceId, queueId: id });
   try {
     const db = getDB();
     const row = getQueueRowById(id);
     const alreadySentCount = row ? countPriorSends(db, row.contact_id, row.template_id) : 0;
-    const sentAtISO = getCurrentUtcISO();
+    const sentAtISO = sentAt === null ? getCurrentUtcISO() : toUTCISOString(sentAt);
     
     debugTraceDbWrite('MarkAsSentUpdate', {
       table: 'message_queue', pk: id, oldState: row?.status ?? 'unknown', newState: QUEUE_STATUS.SENT,

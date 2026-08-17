@@ -45,6 +45,7 @@ export default function ContactListScreen({ navigation }) {
   const [hasMore, setHasMore] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const searchDebounceRef = useRef(null);
+  const searchTokenRef = useRef(0);
 
   // devMode state mein cached hai (SettingsScreen.js wale pattern jaisa) —
   // isDevModeOn() ko seedha JSX/renderItem ke andar baar-baar call karne se
@@ -68,11 +69,13 @@ export default function ContactListScreen({ navigation }) {
   // every search-box change. Resets pagination each time, since a new
   // query means a new result set from the top.
   const loadContacts = useCallback((query = searchQuery) => {
+    const myToken = ++searchTokenRef.current;
     try {
       const trimmed = query.trim();
       const data = trimmed
         ? searchContacts(trimmed, PAGE_SIZE, 0)
         : getContactsPage(PAGE_SIZE, 0);
+      if (myToken !== searchTokenRef.current) return;
       setContacts(data);
       setPage(0);
       setHasMore(data.length === PAGE_SIZE);

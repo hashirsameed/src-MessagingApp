@@ -91,3 +91,6 @@ __tests__/
 
 # Dev-only test screen — never push
 src/screens/DevTestScreen.js
+src/utils/devClock.js
+src/utils/devMode.js
+src/utils/devSimulation.js

@@ -8,7 +8,21 @@ export const SETTINGS_KEYS = {
   // (RATE_LIMIT_RETRY_PREFIX + platformId, e.g. 'retry_next_at_sms').
   // Can't be a flat entry like the ones above since it's parameterized.
   RATE_LIMIT_RETRY_PREFIX: 'retry_next_at_',
+  // Minimum gap (ms) between the completion of one send and the start of the
+  // next — the "1 message/second" floor. Execution + gap semantics: the next
+  // send may only start `minSendIntervalMs` AFTER the previous message's
+  // execution completed. Default 1000ms.
+  MIN_SEND_INTERVAL_MS: 'min_send_interval_ms',
+  // Recovery/pacing policy: when a tier saturates, wait until this fraction
+  // of its capacity has returned before resuming normal scheduling (rather
+  // than resuming at the first freed slot). 0.5 = wait until ~50% free.
+  // Subordinate to the hard sliding-window limits. Default 0.5.
+  RATE_LIMIT_RECOVERY_THRESHOLD: 'rate_limit_recovery_threshold',
 };
+
+// A sub-250ms completion-to-start floor is pathological (execution alone
+// usually exceeds it) — clamp reads to keep the pacing sane.
+const MIN_SEND_INTERVAL_MS_FLOOR = 250;
 
 // ---------------------------------------------------------------------------
 // Generic helpers
@@ -85,3 +99,37 @@ export const getRateLimitRetryVisibility = (platformId) => {
   const raw = getSetting(`${SETTINGS_KEYS.RATE_LIMIT_RETRY_PREFIX}${platformId}`);
   return raw && raw.length > 0 ? raw : null;
 };
+
+/**
+ * Minimum completion-to-start gap for sends on any platform (the
+ * "1 message/second" floor). Execution + gap semantics: the next send may only
+ * start `minSendIntervalMs` AFTER the previous message's execution completed.
+ * Falls back to 1000ms; clamps to >= 250ms.
+ */
+export const getMinSendIntervalMs = () => {
+  const raw = getSetting(SETTINGS_KEYS.MIN_SEND_INTERVAL_MS);
+  if (raw === null || isNaN(Number(raw)) || Number(raw) <= 0) return 1000;
+  return Math.max(MIN_SEND_INTERVAL_MS_FLOOR, Number(raw));
+};
+
+/** @param {number} intervalMs Positive — completion-to-start gap in ms. */
+export const setMinSendIntervalMs = (intervalMs) =>
+  setSetting(SETTINGS_KEYS.MIN_SEND_INTERVAL_MS, intervalMs);
+
+/**
+ * Recovery/pacing policy: when a tier saturates, wait until this fraction of
+ * its capacity has returned before resuming normal scheduling (0.5 = wait
+ * until ~50% free, the default). Subordinate to the hard limits — it only
+ * ever delays sends beyond what the limits require. Clamped to [0, 1]; 0
+ * disables recovery (resume at the first freed slot).
+ */
+export const getRateLimitRecoveryThreshold = () => {
+  const raw = getSetting(SETTINGS_KEYS.RATE_LIMIT_RECOVERY_THRESHOLD);
+  if (raw === null || isNaN(Number(raw))) return 0.5;
+  const clamped = Math.min(1, Math.max(0, Number(raw)));
+  return clamped;
+};
+
+/** @param {number} threshold Fraction in [0, 1] (e.g. 0.5 = 50%). */
+export const setRateLimitRecoveryThreshold = (threshold) =>
+  setSetting(SETTINGS_KEYS.RATE_LIMIT_RECOVERY_THRESHOLD, threshold);

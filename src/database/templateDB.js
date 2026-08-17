@@ -12,6 +12,43 @@ export const getAllTemplates = () => {
   }
 };
 
+// Read only one platform page at a time so template-heavy accounts do not
+// load the complete table when opening the Templates screen.
+export const getTemplatesPage = (platformId, limit, offset) => {
+  try {
+    const db = getDB();
+    const result = db.execute(
+      `SELECT * FROM templates
+       WHERE platform_id = ?
+       ORDER BY created_at DESC
+       LIMIT ? OFFSET ?;`,
+      [platformId, limit, offset]
+    );
+    return result.rows?._array || [];
+  } catch (error) {
+    handleError(error, 'getTemplatesPage');
+    return [];
+  }
+};
+
+// Counts are deliberately separate from page reads: tab badges must show
+// totals, not merely the number of rows currently loaded in the FlatList.
+export const getTemplateCountsByPlatform = () => {
+  try {
+    const db = getDB();
+    const result = db.execute(
+      'SELECT platform_id, COUNT(*) AS count FROM templates GROUP BY platform_id;'
+    );
+    return (result.rows?._array || []).reduce((counts, row) => {
+      counts[row.platform_id ?? 'sms'] = row.count;
+      return counts;
+    }, {});
+  } catch (error) {
+    handleError(error, 'getTemplateCountsByPlatform');
+    return {};
+  }
+};
+
 export const getActiveTemplates = () => {
   try {
     const db = getDB();

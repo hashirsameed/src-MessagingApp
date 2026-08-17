@@ -2,6 +2,12 @@ import { open } from 'react-native-quick-sqlite';
 import { SEED_CONTACTS } from './seedContacts';
 
 let db = null;
+// TEST-ONLY — resets just this module's cached connection reference so a
+// test can simulate "app process restarted" (a fresh getDB() call re-runs
+// ensureSchema()/seed) WITHOUT touching the underlying SQLite storage —
+// on a real device the DB file survives a restart; only this in-memory JS
+// reference doesn't. Never called from any production code path.
+export const __resetDbSingletonForTests = () => { db = null; };
 
 export const getDB = () => {
   if (db) return db;

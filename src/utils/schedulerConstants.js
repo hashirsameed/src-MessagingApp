@@ -3,6 +3,17 @@
  * Single source of truth so the two never drift.
  */
 
+/**
+ * When the computed next-safe-send-time is within this many ms of "now", the
+ * lane/single-item path waits inline (await delay) instead of reverting the
+ * batch and arming a retry alarm. Beyond this, the wait is long enough that
+ * holding the claim in memory (and the reservation) is wasteful, so we revert
+ * to PENDING and let the native retry alarm pick the work back up at the exact
+ * safe time. Kept small so the inline path only covers inter-item pacing
+ * (≈1s execution+gap), never long recovery waits.
+ */
+export const MAX_INLINE_DELAY_MS = 3000;
+
 /** Maximum grace period (ms) after a template's exact send_time during which
  * it is still eligible to be picked up by runExpiryCheck. Prevents a template
  * scheduled for 5 PM from being picked up at 8 PM.

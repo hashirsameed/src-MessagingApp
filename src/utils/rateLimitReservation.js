@@ -15,13 +15,23 @@
 // mid-check-and-reserve — whichever call's synchronous block runs first
 // wins the slot, i.e. first-come-first-served.
 
+import { getNow } from './devClock';
+
+
 const reservationsByPlatform = new Map(); // platformId -> Array<{ id, reservedAtMs }>
 let nextReservationId = 1;
+
+// Per-platform execution context — the timing of the last actual dispatch, so
+// the scheduler can enforce "execution + gap" semantics (next send may only
+// start `minSendIntervalMs` AFTER the previous message's execution completed).
+// Module-level in-memory, like the reservation ledger: persists across
+// processQueue runs and across the alarm path, and resets on process restart.
+const executionByPlatform = new Map(); // platformId -> { lastActualStartMs, lastActualCompletionMs }
 
 const pruneExpired = (platformId, windowMinutes) => {
   const list = reservationsByPlatform.get(platformId);
   if (!list || list.length === 0) return [];
-  const cutoffMs = Date.now() - windowMinutes * 60 * 1000;
+  const cutoffMs = getNow() - windowMinutes * 60 * 1000;
   const fresh = list.filter((r) => r.reservedAtMs > cutoffMs);
   if (fresh.length !== list.length) reservationsByPlatform.set(platformId, fresh);
   return fresh;
@@ -38,7 +48,7 @@ export const getInFlightCount = (platformId, windowMinutes) =>
 export const reserveSlot = (platformId) => {
   const id = nextReservationId++;
   const list = reservationsByPlatform.get(platformId) ?? [];
-  list.push({ id, reservedAtMs: Date.now() });
+  list.push({ id, reservedAtMs: getNow() });
   reservationsByPlatform.set(platformId, list);
   return id;
 };
@@ -48,4 +58,42 @@ export const releaseSlot = (platformId, id) => {
   if (!list) return;
   const idx = list.findIndex((r) => r.id === id);
   if (idx !== -1) list.splice(idx, 1);
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Execution context — "execution + gap" timing for the rate-limit engine.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Current execution timing for a platform. Both fields are null until the
+ * first dispatch records them. The scheduler computes
+ *   nextSendTime = lastActualCompletionMs + minSendIntervalMs
+ * (see rateLimitEngine.calculateNextSafeSendTime).
+ */
+export const getExecutionContext = (platformId) => {
+  const ctx = executionByPlatform.get(platformId);
+  return {
+    lastActualStartMs: ctx?.lastActualStartMs ?? null,
+    lastActualCompletionMs: ctx?.lastActualCompletionMs ?? null,
+  };
+};
+
+/** Record the moment a dispatch for this platform began (the send timestamp). */
+export const recordDispatchStart = (platformId, ms) => {
+  const prev = executionByPlatform.get(platformId);
+  const lastActualStartMs = prev?.lastActualStartMs ?? -Infinity;
+  executionByPlatform.set(platformId, {
+    lastActualStartMs: Math.max(lastActualStartMs, ms),
+    lastActualCompletionMs: prev?.lastActualCompletionMs ?? null,
+  });
+};
+
+/** Record the moment a dispatch for this platform completed (drives the gap). */
+export const recordDispatchCompletion = (platformId, ms) => {
+  const prev = executionByPlatform.get(platformId);
+  const lastActualCompletionMs = prev?.lastActualCompletionMs ?? -Infinity;
+  executionByPlatform.set(platformId, {
+    lastActualStartMs: prev?.lastActualStartMs ?? null,
+    lastActualCompletionMs: Math.max(lastActualCompletionMs, ms),
+  });
 };
